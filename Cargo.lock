@@ -1102,7 +1102,7 @@ dependencies = [
 [[package]]
 name = "nostr"
 version = "0.25.0"
-source = "git+https://github.com/damus-io/nostr-sdk.git?rev=bfd6ac4e111720dcecf8fc09d4ea76da4d971cf4#bfd6ac4e111720dcecf8fc09d4ea76da4d971cf4"
+source = "git+https://github.com/damus-io/nostr-sdk.git?rev=fc0dc7b38f5060f171228b976b9700c0135245d3#fc0dc7b38f5060f171228b976b9700c0135245d3"
 dependencies = [
  "aes",
  "base64",
@@ -1124,7 +1124,7 @@ dependencies = [
 [[package]]
 name = "nostr-database"
 version = "0.1.0"
-source = "git+https://github.com/damus-io/nostr-sdk.git?rev=bfd6ac4e111720dcecf8fc09d4ea76da4d971cf4#bfd6ac4e111720dcecf8fc09d4ea76da4d971cf4"
+source = "git+https://github.com/damus-io/nostr-sdk.git?rev=fc0dc7b38f5060f171228b976b9700c0135245d3#fc0dc7b38f5060f171228b976b9700c0135245d3"
 dependencies = [
  "async-trait",
  "nostr",
@@ -1137,7 +1137,7 @@ dependencies = [
 [[package]]
 name = "nostr-sdk"
 version = "0.25.0"
-source = "git+https://github.com/damus-io/nostr-sdk.git?rev=bfd6ac4e111720dcecf8fc09d4ea76da4d971cf4#bfd6ac4e111720dcecf8fc09d4ea76da4d971cf4"
+source = "git+https://github.com/damus-io/nostr-sdk.git?rev=fc0dc7b38f5060f171228b976b9700c0135245d3#fc0dc7b38f5060f171228b976b9700c0135245d3"
 dependencies = [
  "async-utility",
  "nostr",
@@ -1152,7 +1152,7 @@ dependencies = [
 [[package]]
 name = "nostr-sdk-net"
 version = "0.25.0"
-source = "git+https://github.com/damus-io/nostr-sdk.git?rev=bfd6ac4e111720dcecf8fc09d4ea76da4d971cf4#bfd6ac4e111720dcecf8fc09d4ea76da4d971cf4"
+source = "git+https://github.com/damus-io/nostr-sdk.git?rev=fc0dc7b38f5060f171228b976b9700c0135245d3#fc0dc7b38f5060f171228b976b9700c0135245d3"
 dependencies = [
  "futures-util",
  "thiserror",
@@ -1161,15 +1161,14 @@ dependencies = [
  "tokio-socks",
  "tokio-tungstenite",
  "url-fork",
+ "wasm-ws",
  "webpki-roots",
- "ws_stream_wasm",
 ]
 
 [[package]]
 name = "nostrdb"
 version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b84177dfaea7153703967d0cd589e365093097b4c75661dc50310c0862035bf1"
+source = "git+https://github.com/damus-io/nostrdb-rs.git?rev=0545571827bf64e06250f094d65775acd2a1165e#0545571827bf64e06250f094d65775acd2a1165e"
 dependencies = [
  "cc",
  "env_logger",
@@ -2179,6 +2178,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ab9b36309365056cd639da3134bf87fa8f3d86008abf99e612384a6eecd459f"
 
 [[package]]
+name = "wasm-ws"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "601c6f6340b473083c38e6cdda1f39dfc35d67b0e4b54fa56624d6189c2aa366"
+dependencies = [
+ "async_io_stream",
+ "futures",
+ "js-sys",
+ "pharos",
+ "send_wrapper",
+ "thiserror",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "web-sys"
 version = "0.3.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2377,25 +2393,6 @@ checksum = "524e57b2c537c0f9b1e69f1965311ec12182b4122e45035b1508cd24d2adadb1"
 dependencies = [
  "cfg-if",
  "windows-sys 0.48.0",
-]
-
-[[package]]
-name = "ws_stream_wasm"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7999f5f4217fe3818726b66257a4475f71e74ffd190776ad053fa159e50737f5"
-dependencies = [
- "async_io_stream",
- "futures",
- "js-sys",
- "log",
- "pharos",
- "rustc_version",
- "send_wrapper",
- "thiserror",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

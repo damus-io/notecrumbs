@@ -517,6 +517,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "flatbuffers"
+version = "23.5.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4dac53e22462d78c16d64a1cd22371b54cc3fe94aa15e7886a2fa6e5d1ab8640"
+dependencies = [
+ "bitflags 1.3.2",
+ "rustc_version",
+]
+
+[[package]]
 name = "flate2"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1167,11 +1177,12 @@ dependencies = [
 
 [[package]]
 name = "nostrdb"
-version = "0.1.3"
-source = "git+https://github.com/damus-io/nostrdb-rs.git?rev=0545571827bf64e06250f094d65775acd2a1165e#0545571827bf64e06250f094d65775acd2a1165e"
+version = "0.1.4"
+source = "git+https://github.com/damus-io/nostrdb-rs.git?rev=4f40de4b1458251ad33244fc76bcc2a03d099e49#4f40de4b1458251ad33244fc76bcc2a03d099e49"
 dependencies = [
  "cc",
  "env_logger",
+ "flatbuffers",
  "libc",
  "log",
 ]

@@ -2,7 +2,7 @@
 # notecrumbs
 
 A nostr opengraph server build on [nostrdb][nostrdb], [egui][egui], and
-[skia][egui-skia]. It renders notes using the CPU
+[skia][egui-skia]. It renders notes using the CPU in around 50ms.
 
 WIP!
 

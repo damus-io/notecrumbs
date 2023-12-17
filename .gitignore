@@ -1,0 +1,6 @@
+/target
+/.direnv
+data.mdb
+lock.mdb
+.build-result
+.buildcmd

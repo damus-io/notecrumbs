@@ -17,7 +17,7 @@ WIP!
 
 - [x] Local note fetching with nostrdb 
 - [x] Basic note rendering
-- [ ] Fetch notes from relays
+- [x] Fetch notes from relays
 - [ ] Render profile pictures
 - [ ] Cache profile pictures
 - [ ] HTML note page

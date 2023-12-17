@@ -1,6 +1,5 @@
 use nostr_sdk::nips::nip19;
 use std::array::TryFromSliceError;
-use std::error::Error as StdError;
 use std::fmt;
 
 #[derive(Debug)]
@@ -47,14 +46,4 @@ impl fmt::Display for Error {
     }
 }
 
-// Implementing `StdError`
-impl StdError for Error {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        match self {
-            Error::Nip19(e) => Some(e),
-            Error::Http(e) => Some(e),
-            Error::Nostrdb(e) => Some(e),
-            Error::SliceErr => None,
-        }
-    }
-}
+impl std::error::Error for Error {}

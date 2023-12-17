@@ -1,6 +1,8 @@
 
 # notecrumbs
 
+![ci](https://github.com/damus-io/notecrumbs/actions/workflows/rust.yml/badge.svg)
+
 A nostr opengraph server build on [nostrdb][nostrdb], [egui][egui], and
 [skia][egui-skia]. It renders notes using the CPU in around 50ms.
 

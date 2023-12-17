@@ -7,7 +7,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use log::{error, info, warn};
+use log::{debug, info};
 use tokio::net::TcpListener;
 
 use crate::error::Error;
@@ -29,11 +29,18 @@ struct Context {
     timeout: Duration,
 }
 
-fn nip19_evid(nip19: &Nip19) -> Option<EventId> {
+enum Target {
+    Profile(XOnlyPublicKey),
+    Event(EventId),
+}
+
+fn nip19_target(nip19: &Nip19) -> Option<Target> {
     match nip19 {
-        Nip19::Event(ev) => Some(ev.event_id),
-        Nip19::EventId(evid) => Some(*evid),
-        _ => None,
+        Nip19::Event(ev) => Some(Target::Event(ev.event_id)),
+        Nip19::EventId(evid) => Some(Target::Event(*evid)),
+        Nip19::Profile(prof) => Some(Target::Profile(prof.public_key)),
+        Nip19::Pubkey(pk) => Some(Target::Profile(*pk)),
+        Nip19::Secret(_) => None,
     }
 }
 
@@ -153,8 +160,8 @@ async fn serve(
         }
     };
 
-    let evid = match nip19_evid(&nip19) {
-        Some(evid) => evid,
+    let target = match nip19_target(&nip19) {
+        Some(target) => target,
         None => {
             return Ok(Response::builder()
                 .status(StatusCode::NOT_FOUND)
@@ -164,31 +171,47 @@ async fn serve(
 
     let content = {
         let mut txn = Transaction::new(&ctx.ndb)?;
-        ctx.ndb
-            .get_note_by_id(&mut txn, evid.as_bytes().try_into()?)
-            .map(|n| {
-                info!("cache hit {:?}", nip19);
-                n.content().to_string()
-            })
+        match target {
+            Target::Profile(pk) => ctx
+                .ndb
+                .get_profile_by_pubkey(&mut txn, &pk.serialize())
+                .and_then(|n| {
+                    info!("profile cache hit {:?}", nip19);
+                    Ok(n.record
+                        .profile()
+                        .ok_or(nostrdb::Error::NotFound)?
+                        .name()
+                        .ok_or(nostrdb::Error::NotFound)?
+                        .to_string())
+                }),
+            Target::Event(evid) => ctx
+                .ndb
+                .get_note_by_id(&mut txn, evid.as_bytes().try_into()?)
+                .map(|n| {
+                    info!("event cache hit {:?}", nip19);
+                    n.content().to_string()
+                }),
+        }
     };
 
     let content = match content {
         Ok(content) => content,
-        Err(nostrdb::Error::NotFound) => match find_note(ctx, &nip19).await {
-            Ok(note) => {
-                ctx.ndb
-                    .process_event(&json!(["EVENT", "s", note]).to_string());
-                note.content
+        Err(nostrdb::Error::NotFound) => {
+            debug!("Finding {:?}", nip19);
+            match find_note(ctx, &nip19).await {
+                Ok(note) => {
+                    let _ = ctx
+                        .ndb
+                        .process_event(&json!(["EVENT", "s", note]).to_string());
+                    note.content
+                }
+                Err(_err) => {
+                    return Ok(Response::builder().status(StatusCode::NOT_FOUND).body(
+                        Full::new(Bytes::from(format!("noteid {:?} not found\n", nip19))),
+                    )?);
+                }
             }
-            Err(err) => {
-                return Ok(Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body(Full::new(Bytes::from(format!(
-                        "noteid {} not found\n",
-                        ::hex::encode(evid)
-                    ))))?);
-            }
-        },
+        }
         Err(err) => {
             return Ok(Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -220,9 +243,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(addr).await?;
     info!("Listening on 127.0.0.1:3000");
 
-    let cfg = Config::new();
+    // Since ndk-sdk will verify for us, we don't need to do it on the db side
+    let mut cfg = Config::new();
+    cfg.skip_validation(true);
     let ndb = Ndb::new(".", &cfg).expect("ndb failed to open");
-    //let font_data = egui::FontData::from_static(include_bytes!("../fonts/NotoSans-Regular.ttf"));
     let keys = Keys::generate();
     let timeout = get_env_timeout();
     let ctx = Context { ndb, keys, timeout };

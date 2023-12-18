@@ -8,104 +8,36 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use log::{debug, info};
+use std::sync::Arc;
 use tokio::net::TcpListener;
 
 use crate::error::Error;
-use nostr_sdk::nips::nip19::Nip19;
 use nostr_sdk::prelude::*;
 use nostrdb::{Config, Ndb, Transaction};
 use std::time::Duration;
 
-use nostr_sdk::Kind;
+use lru::LruCache;
 
 mod error;
+mod nip19;
+mod pfp;
+mod render;
 
-#[derive(Debug, Clone)]
-struct Notecrumbs {
-    ndb: Ndb,
-    keys: Keys,
-
-    /// How long do we wait for remote note requests
-    timeout: Duration,
-}
-
-enum Target {
+pub enum Target {
     Profile(XOnlyPublicKey),
     Event(EventId),
 }
 
-fn nip19_target(nip19: &Nip19) -> Option<Target> {
-    match nip19 {
-        Nip19::Event(ev) => Some(Target::Event(ev.event_id)),
-        Nip19::EventId(evid) => Some(Target::Event(*evid)),
-        Nip19::Profile(prof) => Some(Target::Profile(prof.public_key)),
-        Nip19::Pubkey(pk) => Some(Target::Profile(*pk)),
-        Nip19::Secret(_) => None,
-    }
-}
+type ImageCache = LruCache<XOnlyPublicKey, egui::TextureHandle>;
 
-fn note_ui(app: &Notecrumbs, ctx: &egui::Context, content: &str) {
-    use egui::{FontId, RichText};
+#[derive(Debug, Clone)]
+pub struct Notecrumbs {
+    ndb: Ndb,
+    keys: Keys,
+    img_cache: Arc<ImageCache>,
 
-    egui::CentralPanel::default().show(&ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("✏").font(FontId::proportional(120.0)));
-            ui.vertical(|ui| {
-                ui.label(RichText::new(content).font(FontId::proportional(40.0)));
-            });
-        })
-    });
-}
-
-fn render_note(app: &Notecrumbs, content: &str) -> Vec<u8> {
-    use egui_skia::{rasterize, RasterizeOptions};
-    use skia_safe::EncodedImageFormat;
-
-    let options = RasterizeOptions {
-        pixels_per_point: 1.0,
-        frames_before_screenshot: 1,
-    };
-
-    let mut surface = rasterize((1200, 630), |ctx| note_ui(app, ctx, content), Some(options));
-
-    surface
-        .image_snapshot()
-        .encode_to_data(EncodedImageFormat::PNG)
-        .expect("expected image")
-        .as_bytes()
-        .into()
-}
-
-fn nip19_to_filters(nip19: &Nip19) -> Result<Vec<Filter>, Error> {
-    match nip19 {
-        Nip19::Event(ev) => {
-            let mut filters = vec![Filter::new().id(ev.event_id).limit(1)];
-            if let Some(author) = ev.author {
-                filters.push(Filter::new().author(author).kind(Kind::Metadata).limit(1))
-            }
-            Ok(filters)
-        }
-        Nip19::EventId(evid) => Ok(vec![Filter::new().id(*evid).limit(1)]),
-        Nip19::Profile(prof) => Ok(vec![Filter::new()
-            .author(prof.public_key)
-            .kind(Kind::Metadata)
-            .limit(1)]),
-        Nip19::Pubkey(pk) => Ok(vec![Filter::new()
-            .author(*pk)
-            .kind(Kind::Metadata)
-            .limit(1)]),
-        Nip19::Secret(_sec) => Err(Error::InvalidNip19),
-    }
-}
-
-fn nip19_relays(nip19: &Nip19) -> Vec<String> {
-    let mut relays: Vec<String> = vec![];
-    match nip19 {
-        Nip19::Event(ev) => relays.extend(ev.relays.clone()),
-        Nip19::Profile(p) => relays.extend(p.relays.clone()),
-        _ => (),
-    }
-    relays
+    /// How long do we wait for remote note requests
+    timeout: Duration,
 }
 
 async fn find_note(app: &Notecrumbs, nip19: &Nip19) -> Result<nostr_sdk::Event, Error> {
@@ -114,14 +46,14 @@ async fn find_note(app: &Notecrumbs, nip19: &Nip19) -> Result<nostr_sdk::Event, 
 
     let _ = client.add_relay("wss://relay.damus.io").await;
 
-    let other_relays = nip19_relays(nip19);
+    let other_relays = nip19::to_relays(nip19);
     for relay in other_relays {
         let _ = client.add_relay(relay).await;
     }
 
     client.connect().await;
 
-    let filters = nip19_to_filters(nip19)?;
+    let filters = nip19::to_filters(nip19)?;
 
     client
         .req_events_of(filters.clone(), Some(app.timeout))
@@ -159,7 +91,7 @@ async fn serve(
         }
     };
 
-    let target = match nip19_target(&nip19) {
+    let target = match nip19::to_target(&nip19) {
         Some(target) => target,
         None => {
             return Ok(Response::builder()
@@ -218,7 +150,7 @@ async fn serve(
         }
     };
 
-    let data = render_note(&app, &content);
+    let data = render::render_note(&app, &content);
 
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "image/png")
@@ -248,7 +180,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ndb = Ndb::new(".", &cfg).expect("ndb failed to open");
     let keys = Keys::generate();
     let timeout = get_env_timeout();
-    let app = Notecrumbs { ndb, keys, timeout };
+    let img_cache = Arc::new(LruCache::new(std::num::NonZeroUsize::new(64).unwrap()));
+    let app = Notecrumbs {
+        ndb,
+        keys,
+        timeout,
+        img_cache,
+    };
 
     // We start a loop to continuously accept incoming connections
     loop {

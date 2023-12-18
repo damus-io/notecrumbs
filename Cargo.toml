@@ -17,7 +17,6 @@ nostrdb = { git = "https://github.com/damus-io/nostrdb-rs.git", rev = "4f40de4b1
 nostr-sdk = { git = "https://github.com/damus-io/nostr-sdk.git", rev = "fc0dc7b38f5060f171228b976b9700c0135245d3" }
 hex = "0.4.3"
 egui = "0.21.0"
-egui_skia = { version = "0.4.0", features = ["cpu_fix"] }
-skia-safe = "0.58.0"
+egui_skia = { git = "https://github.com/jb55/egui_skia.git", rev = "33b2ed6ae7fe8eedb727302d56e13b25526d1e82", features = ["cpu_fix"] }
 image = "0.24.7"
 lru = "0.12.1"

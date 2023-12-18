@@ -21,7 +21,7 @@ use nostr_sdk::Kind;
 mod error;
 
 #[derive(Debug, Clone)]
-struct Context {
+struct Notecrumbs {
     ndb: Ndb,
     keys: Keys,
 
@@ -44,7 +44,7 @@ fn nip19_target(nip19: &Nip19) -> Option<Target> {
     }
 }
 
-fn note_ui(ctx: &egui::Context, content: &str) {
+fn note_ui(app: &Notecrumbs, ctx: &egui::Context, content: &str) {
     use egui::{FontId, RichText};
 
     egui::CentralPanel::default().show(&ctx, |ui| {
@@ -57,7 +57,7 @@ fn note_ui(ctx: &egui::Context, content: &str) {
     });
 }
 
-fn render_note(_app_ctx: &Context, content: &str) -> Vec<u8> {
+fn render_note(app: &Notecrumbs, content: &str) -> Vec<u8> {
     use egui_skia::{rasterize, RasterizeOptions};
     use skia_safe::EncodedImageFormat;
 
@@ -66,7 +66,7 @@ fn render_note(_app_ctx: &Context, content: &str) -> Vec<u8> {
         frames_before_screenshot: 1,
     };
 
-    let mut surface = rasterize((1200, 630), |ctx| note_ui(ctx, content), Some(options));
+    let mut surface = rasterize((1200, 630), |ctx| note_ui(app, ctx, content), Some(options));
 
     surface
         .image_snapshot()
@@ -108,9 +108,9 @@ fn nip19_relays(nip19: &Nip19) -> Vec<String> {
     relays
 }
 
-async fn find_note(ctx: &Context, nip19: &Nip19) -> Result<nostr_sdk::Event, Error> {
+async fn find_note(app: &Notecrumbs, nip19: &Nip19) -> Result<nostr_sdk::Event, Error> {
     let opts = Options::new().shutdown_on_drop(true);
-    let client = Client::with_opts(&ctx.keys, opts);
+    let client = Client::with_opts(&app.keys, opts);
 
     let _ = client.add_relay("wss://relay.damus.io").await;
 
@@ -124,7 +124,7 @@ async fn find_note(ctx: &Context, nip19: &Nip19) -> Result<nostr_sdk::Event, Err
     let filters = nip19_to_filters(nip19)?;
 
     client
-        .req_events_of(filters.clone(), Some(ctx.timeout))
+        .req_events_of(filters.clone(), Some(app.timeout))
         .await;
 
     loop {
@@ -147,7 +147,7 @@ async fn find_note(ctx: &Context, nip19: &Nip19) -> Result<nostr_sdk::Event, Err
 }
 
 async fn serve(
-    ctx: &Context,
+    app: &Notecrumbs,
     r: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, Error> {
     let nip19 = match Nip19::from_bech32(&r.uri().to_string()[1..]) {
@@ -169,9 +169,9 @@ async fn serve(
     };
 
     let content = {
-        let mut txn = Transaction::new(&ctx.ndb)?;
+        let mut txn = Transaction::new(&app.ndb)?;
         match target {
-            Target::Profile(pk) => ctx
+            Target::Profile(pk) => app
                 .ndb
                 .get_profile_by_pubkey(&mut txn, &pk.serialize())
                 .and_then(|n| {
@@ -183,7 +183,7 @@ async fn serve(
                         .ok_or(nostrdb::Error::NotFound)?
                         .to_string())
                 }),
-            Target::Event(evid) => ctx
+            Target::Event(evid) => app
                 .ndb
                 .get_note_by_id(&mut txn, evid.as_bytes().try_into()?)
                 .map(|n| {
@@ -197,9 +197,9 @@ async fn serve(
         Ok(content) => content,
         Err(nostrdb::Error::NotFound) => {
             debug!("Finding {:?}", nip19);
-            match find_note(ctx, &nip19).await {
+            match find_note(app, &nip19).await {
                 Ok(note) => {
-                    let _ = ctx
+                    let _ = app
                         .ndb
                         .process_event(&json!(["EVENT", "s", note]).to_string());
                     note.content
@@ -218,7 +218,7 @@ async fn serve(
         }
     };
 
-    let data = render_note(&ctx, &content);
+    let data = render_note(&app, &content);
 
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "image/png")
@@ -248,7 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ndb = Ndb::new(".", &cfg).expect("ndb failed to open");
     let keys = Keys::generate();
     let timeout = get_env_timeout();
-    let ctx = Context { ndb, keys, timeout };
+    let app = Notecrumbs { ndb, keys, timeout };
 
     // We start a loop to continuously accept incoming connections
     loop {
@@ -258,14 +258,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // `hyper::rt` IO traits.
         let io = TokioIo::new(stream);
 
-        let ctx_copy = ctx.clone();
+        let app_copy = app.clone();
 
         // Spawn a tokio task to serve multiple connections concurrently
         tokio::task::spawn(async move {
             // Finally, we bind the incoming connection to our `hello` service
             if let Err(err) = http1::Builder::new()
                 // `service_fn` converts our function in a `Service`
-                .serve_connection(io, service_fn(|req| serve(&ctx_copy, req)))
+                .serve_connection(io, service_fn(|req| serve(&app_copy, req)))
                 .await
             {
                 println!("Error serving connection: {:?}", err);

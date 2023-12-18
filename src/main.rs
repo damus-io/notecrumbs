@@ -44,30 +44,29 @@ fn nip19_target(nip19: &Nip19) -> Option<Target> {
     }
 }
 
-fn render_note<'a>(_app_ctx: &Context, content: &'a str) -> Vec<u8> {
+fn note_ui(ctx: &egui::Context, content: &str) {
     use egui::{FontId, RichText};
+
+    egui::CentralPanel::default().show(&ctx, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("✏").font(FontId::proportional(120.0)));
+            ui.vertical(|ui| {
+                ui.label(RichText::new(content).font(FontId::proportional(40.0)));
+            });
+        })
+    });
+}
+
+fn render_note(_app_ctx: &Context, content: &str) -> Vec<u8> {
     use egui_skia::{rasterize, RasterizeOptions};
     use skia_safe::EncodedImageFormat;
 
-    let mut surface = rasterize(
-        (1200, 630),
-        |ctx| {
-            //setup_fonts(&app_ctx.font_data, ctx);
+    let options = RasterizeOptions {
+        pixels_per_point: 1.0,
+        frames_before_screenshot: 1,
+    };
 
-            egui::CentralPanel::default().show(&ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("✏").font(FontId::proportional(120.0)));
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(content).font(FontId::proportional(40.0)));
-                    });
-                })
-            });
-        },
-        Some(RasterizeOptions {
-            pixels_per_point: 1.0,
-            frames_before_screenshot: 1,
-        }),
-    );
+    let mut surface = rasterize((1200, 630), |ctx| note_ui(ctx, content), Some(options));
 
     surface
         .image_snapshot()

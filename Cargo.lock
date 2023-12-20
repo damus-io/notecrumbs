@@ -513,6 +513,7 @@ dependencies = [
 [[package]]
 name = "egui_skia"
 version = "0.4.0"
+source = "git+https://github.com/jb55/egui_skia.git?rev=6205d63e751d3acfcf6d43908c27a82d59706038#6205d63e751d3acfcf6d43908c27a82d59706038"
 dependencies = [
  "egui",
  "skia-safe",

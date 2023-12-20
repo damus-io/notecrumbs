@@ -7,16 +7,22 @@ edition = "2021"
 
 [dependencies]
 #nostrdb = "0.1.2"
-hyper = { version = "1", features = ["full"] }
-tokio = { version = "1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["full"] }
+hyper = { version = "1.1.0", features = ["full"] }
+tokio = { version = "1.1.0", features = ["full"] }
+hyper-util = { version = "0.1.1", features = ["full"] }
 http-body-util = "0.1"
 log = "0.4.20"
 env_logger = "0.10.1"
-nostrdb = { git = "https://github.com/damus-io/nostrdb-rs.git", rev = "4f40de4b1458251ad33244fc76bcc2a03d099e49" }
+nostrdb = { git = "https://github.com/damus-io/nostrdb-rs.git", rev = "21d0002f5ff62e51c4114e3d15a2ffa4e99b17e8" }
+#nostrdb = { path = "/home/jb55/src/rust/nostrdb-rs" }
 nostr-sdk = { git = "https://github.com/damus-io/nostr-sdk.git", rev = "fc0dc7b38f5060f171228b976b9700c0135245d3" }
 hex = "0.4.3"
-egui = "0.21.0"
-egui_skia = { git = "https://github.com/jb55/egui_skia.git", rev = "33b2ed6ae7fe8eedb727302d56e13b25526d1e82", features = ["cpu_fix"] }
+egui = "0.23.0"
+egui_extras = { version = "0.23.0", features = ["image", "svg"] }
+#egui_skia = { git = "https://github.com/jb55/egui_skia.git", rev = "33b2ed6ae7fe8eedb727302d56e13b25526d1e82", features = ["cpu_fix"] }
+egui_skia = { path = "/home/jb55/dev/github/lucasmerlin/egui_skia", features = ["cpu_fix"] }
+skia-safe = "0.58.0"
 image = "0.24.7"
 lru = "0.12.1"
+bytes = "1.5.0"
+http = "1.0.0"

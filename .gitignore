@@ -6,3 +6,4 @@ lock.mdb
 .build-result
 .buildcmd
 tags
+perf.data

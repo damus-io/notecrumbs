@@ -1,5 +1,8 @@
 use crate::{fonts, Error, Notecrumbs};
-use egui::{Color32, ColorImage, FontId, RichText, Visuals};
+use egui::{
+    pos2, Color32, ColorImage, FontId, Label, Rect, RichText, Rounding, TextureHandle, Vec2,
+    Visuals,
+};
 use log::{debug, info, warn};
 use nostr_sdk::nips::nip19::Nip19;
 use nostr_sdk::prelude::*;
@@ -345,28 +348,64 @@ fn wrapped_body(ui: &mut egui::Ui, text: &str) {
     ui.label(job);
 }
 
-fn centered_layout() -> egui::Layout {
+fn right_aligned() -> egui::Layout {
+    use egui::{Align, Direction, Layout};
+
+    Layout {
+        main_dir: Direction::RightToLeft,
+        main_wrap: false,
+        main_align: Align::Center,
+        main_justify: false,
+        cross_align: Align::Center,
+        cross_justify: false,
+    }
+}
+
+fn note_frame_align() -> egui::Layout {
     use egui::{Align, Direction, Layout};
 
     Layout {
         main_dir: Direction::TopDown,
-        main_wrap: true,
+        main_wrap: false,
         main_align: Align::Center,
-        main_justify: true,
+        main_justify: false,
         cross_align: Align::Center,
-        cross_justify: true,
+        cross_justify: false,
+    }
+}
+
+fn quoted_text_align() -> egui::Layout {
+    use egui::{Align, Direction, Layout};
+
+    Layout {
+        main_dir: Direction::TopDown,
+        main_wrap: false,
+        main_align: Align::Center,
+        main_justify: false,
+        cross_align: Align::Center,
+        cross_justify: false,
     }
 }
 
 fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
-    use egui::{FontId, Label, RichText, Rounding};
-
-    let pfp = ctx.load_texture("pfp", note.profile.pfp.clone(), Default::default());
     setup_visuals(&app.font_data, ctx);
 
     let outer_margin = 40.0;
-    let inner_margin = 100.0;
+    let inner_margin = 60.0;
+    let canvas_width = 1200.0;
+    let canvas_height = 630.0;
+    let canvas_size = Vec2::new(canvas_width, canvas_height);
+
     let total_margin = outer_margin + inner_margin;
+    let pfp = ctx.load_texture("pfp", note.profile.pfp.clone(), Default::default());
+
+    /*
+    let desired_height = canvas_height - total_margin * 2.0;
+    let desired_width = canvas_width - total_margin * 2.0;
+    let desired_size = Vec2::new(desired_width, desired_height);
+    ui.set_min_size(desired_size);
+    ui.set_max_size(desired_size);
+    */
 
     egui::CentralPanel::default()
         .frame(egui::Frame::default().fill(Color32::from_rgb(0x43, 0x20, 0x62)))
@@ -377,27 +416,50 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
                 .outer_margin(outer_margin)
                 .inner_margin(inner_margin)
                 .show(ui, |ui| {
-                    let desired_height = 630.0 - total_margin * 2.0;
-                    let desired_width = 1200.0 - total_margin * 2.0;
-                    let desired_size = egui::vec2(desired_width, desired_height);
-                    ui.set_min_height(desired_height); // Set minimum height for the container
-                    ui.set_min_width(desired_width); // Set minimum width for the container
-                                                     //
-                    ui.centered_and_justified(|ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            //ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                    let desired_height = canvas_height - total_margin * 2.0;
+                    let desired_width = canvas_width - total_margin * 2.0;
+                    let desired_size = Vec2::new(desired_width, desired_height);
+                    ui.set_max_size(desired_size);
 
-                            //ui.vertical(|ui| {
-                            wrapped_body(ui, &note.note.content);
-                            ui.horizontal(|ui| {
-                                ui.image(&pfp);
-                                render_username(app, ui, &note.profile);
+                    ui.with_layout(note_frame_align(), |ui| {
+                        //egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(10.0, 50.0);
+
+                        ui.horizontal(|ui| {
+                            ui.with_layout(right_aligned(), |ui| {
+                                ui.label(RichText::new("damus.io").size(20.0));
                             });
-                            //});
                         });
-                    })
-                })
+
+                        ui.vertical(|ui| {
+                            ui.set_max_size(Vec2::new(desired_width, desired_height / 1.8));
+                            ui.centered_and_justified(|ui| {
+                                // only one widget is allowed in here
+                                wrapped_body(ui, &note.note.content);
+                            });
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.image(&pfp);
+                            render_username(app, ui, &note.profile);
+                            ui.with_layout(right_aligned(), discuss_on_damus);
+                        });
+                    });
+                });
         });
+}
+
+fn discuss_on_damus(ui: &mut egui::Ui) {
+    let button = egui::Button::new(
+        RichText::new("Discuss on Damus ➡")
+            .size(20.0)
+            .color(Color32::BLACK),
+    )
+    .rounding(50.0)
+    .min_size(Vec2::new(305.0, 64.0))
+    .fill(Color32::WHITE);
+
+    ui.add(button);
 }
 
 fn profile_ui(app: &Notecrumbs, ctx: &egui::Context, profile: &ProfileRenderData) {

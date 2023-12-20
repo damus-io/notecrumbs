@@ -1,6 +1,5 @@
 /target
 /.direnv
-/fonts
 data.mdb
 lock.mdb
 .build-result

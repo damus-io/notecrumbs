@@ -1,5 +1,4 @@
 use crate::error::Error;
-use crate::Target;
 use nostr_sdk::nips::nip19::Nip19;
 use nostr_sdk::prelude::*;
 

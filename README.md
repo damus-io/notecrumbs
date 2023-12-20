@@ -22,7 +22,7 @@ WIP!
 - [ ] Cache profile pictures
 - [ ] HTML note page
 
-Very alpha. I mean look at the current design...
+Very alpha. The design is still a bit rough, but getting there:
 
-![wip](https://cdn.jb55.com/s/nevent1qqstj0wgdgplzypp5fjlg5vdr9mcex5me7elhcvh2trk0836y69q9cgsn6gzr.png)
+![wip](https://cdn.jb55.com/s/note1hy7us6sr7ygzrgn973gc6xth3jdfhnanl0sew5k8v70r5f52qtss0pwcha.png)
 

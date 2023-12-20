@@ -1,13 +1,9 @@
 use crate::{fonts, Error, Notecrumbs};
-use egui::{
-    pos2, Color32, ColorImage, FontId, Label, Rect, RichText, Rounding, TextureHandle, Vec2,
-    Visuals,
-};
+use egui::{Color32, FontId, RichText, Rounding, Vec2, Visuals};
 use log::{debug, info, warn};
 use nostr_sdk::nips::nip19::Nip19;
 use nostr_sdk::prelude::*;
 use nostrdb::{Note, Transaction};
-use std::sync::Arc;
 
 impl ProfileRenderData {
     pub fn default(pfp: egui::ImageData) -> Self {
@@ -274,46 +270,11 @@ pub fn get_render_data(app: &Notecrumbs, target: &Nip19) -> Result<PartialRender
     }
 }
 
-#[inline]
-pub fn floor_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        s.len()
-    } else {
-        let lower_bound = index.saturating_sub(3);
-        let new_index = s.as_bytes()[lower_bound..=index]
-            .iter()
-            .rposition(|b| is_utf8_char_boundary(*b));
-
-        // SAFETY: we know that the character boundary will be within four bytes
-        unsafe { lower_bound + new_index.unwrap_unchecked() }
-    }
-}
-
-#[inline]
-fn is_utf8_char_boundary(c: u8) -> bool {
-    // This is bit magic equivalent to: b < 128 || b >= 192
-    (c as i8) >= -0x40
-}
-
-fn ui_abbreviate_name(ui: &mut egui::Ui, name: &str, len: usize) {
-    if name.len() > len {
-        let closest = floor_char_boundary(name, len);
-        heading(ui, &name[..closest]);
-        heading(ui, "...");
-    } else {
-        heading(ui, name);
-    }
-}
-
-fn render_username(app: &Notecrumbs, ui: &mut egui::Ui, profile: &ProfileRenderData) {
+fn render_username(ui: &mut egui::Ui, profile: &ProfileRenderData) {
     #[cfg(feature = "profiling")]
     puffin::profile_function!();
     let name = format!("@{}", profile.name);
     ui.label(RichText::new(&name).size(30.0).color(Color32::DARK_GRAY));
-}
-
-fn heading(ui: &mut egui::Ui, text: impl Into<RichText>) {
-    ui.label(text.into().size(40.0));
 }
 
 fn setup_visuals(font_data: &egui::FontData, ctx: &egui::Context) {
@@ -374,19 +335,6 @@ fn note_frame_align() -> egui::Layout {
     }
 }
 
-fn quoted_text_align() -> egui::Layout {
-    use egui::{Align, Direction, Layout};
-
-    Layout {
-        main_dir: Direction::TopDown,
-        main_wrap: false,
-        main_align: Align::Center,
-        main_justify: false,
-        cross_align: Align::Center,
-        cross_justify: false,
-    }
-}
-
 fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
     setup_visuals(&app.font_data, ctx);
 
@@ -394,7 +342,7 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
     let inner_margin = 60.0;
     let canvas_width = 1200.0;
     let canvas_height = 630.0;
-    let canvas_size = Vec2::new(canvas_width, canvas_height);
+    //let canvas_size = Vec2::new(canvas_width, canvas_height);
 
     let total_margin = outer_margin + inner_margin;
     let pfp = ctx.load_texture("pfp", note.profile.pfp.clone(), Default::default());
@@ -441,7 +389,7 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
 
                         ui.horizontal(|ui| {
                             ui.image(&pfp);
-                            render_username(app, ui, &note.profile);
+                            render_username(ui, &note.profile);
                             ui.with_layout(right_aligned(), discuss_on_damus);
                         });
                     });
@@ -463,8 +411,6 @@ fn discuss_on_damus(ui: &mut egui::Ui) {
 }
 
 fn profile_ui(app: &Notecrumbs, ctx: &egui::Context, profile: &ProfileRenderData) {
-    use egui::{FontId, RichText};
-
     let pfp = ctx.load_texture("pfp", profile.pfp.clone(), Default::default());
     setup_visuals(&app.font_data, ctx);
 
@@ -472,7 +418,7 @@ fn profile_ui(app: &Notecrumbs, ctx: &egui::Context, profile: &ProfileRenderData
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.image(&pfp);
-                render_username(app, ui, &profile);
+                render_username(ui, &profile);
             });
             //body(ui, &profile.about);
         });

@@ -12,9 +12,8 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 
 use crate::error::Error;
-use crate::render::NoteRenderData;
 use nostr_sdk::prelude::*;
-use nostrdb::{Config, Ndb, Transaction};
+use nostrdb::{Config, Ndb};
 use std::time::Duration;
 
 use lru::LruCache;
@@ -110,7 +109,7 @@ async fn serve(
 
     // render_data is always returned, it just might be empty
     let partial_render_data = match render::get_render_data(&app, &nip19) {
-        Err(err) => {
+        Err(_err) => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Full::new(Bytes::from(

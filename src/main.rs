@@ -154,7 +154,7 @@ fn serve_note_html(
     // 4: Full content
 
     let hostname = "https://damus.io";
-    let abbrev_content = abbreviate(&note.note.content, 20);
+    let abbrev_content = abbreviate(&note.note.content, 64);
     let content = &note.note.content;
 
     write!(
@@ -200,7 +200,7 @@ fn serve_note_html(
         hostname,
         nip19.to_bech32().unwrap(),
         content
-    );
+    )?;
 
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "text/html")

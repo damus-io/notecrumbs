@@ -7,17 +7,62 @@ use tokio::sync::broadcast::error::RecvError;
 pub enum Error {
     Nip19(nip19::Error),
     Http(hyper::http::Error),
+    Hyper(hyper::Error),
     Nostrdb(nostrdb::Error),
     NostrClient(nostr_sdk::client::Error),
     Recv(RecvError),
+    Io(std::io::Error),
+    Generic(String),
+    Image(image::error::ImageError),
+    Secp(nostr_sdk::secp256k1::Error),
+    InvalidUri,
     NotFound,
+    /// Profile picture is too big
+    TooBig,
     InvalidNip19,
+    InvalidProfilePic,
     SliceErr,
+}
+
+impl From<image::error::ImageError> for Error {
+    fn from(err: image::error::ImageError) -> Self {
+        Error::Image(err)
+    }
+}
+
+impl From<http::uri::InvalidUri> for Error {
+    fn from(err: http::uri::InvalidUri) -> Self {
+        Error::InvalidUri
+    }
+}
+
+impl From<nostr_sdk::secp256k1::Error> for Error {
+    fn from(err: nostr_sdk::secp256k1::Error) -> Self {
+        Error::Secp(err)
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Error::Io(err)
+    }
+}
+
+impl From<String> for Error {
+    fn from(err: String) -> Self {
+        Error::Generic(err)
+    }
 }
 
 impl From<RecvError> for Error {
     fn from(err: RecvError) -> Self {
         Error::Recv(err)
+    }
+}
+
+impl From<hyper::Error> for Error {
+    fn from(err: hyper::Error) -> Self {
+        Error::Hyper(err)
     }
 }
 
@@ -63,6 +108,14 @@ impl fmt::Display for Error {
             Error::Recv(e) => write!(f, "Recieve error: {}", e),
             Error::InvalidNip19 => write!(f, "Invalid nip19 object"),
             Error::SliceErr => write!(f, "Array slice error"),
+            Error::TooBig => write!(f, "Profile picture is too big"),
+            Error::InvalidProfilePic => write!(f, "Profile picture is corrupt"),
+            Error::Image(err) => write!(f, "Image error: {}", err),
+            Error::InvalidUri => write!(f, "Invalid url"),
+            Error::Hyper(err) => write!(f, "Hyper error: {}", err),
+            Error::Generic(err) => write!(f, "Generic error: {}", err),
+            Error::Io(err) => write!(f, "Io error: {}", err),
+            Error::Secp(err) => write!(f, "Signature error: {}", err),
         }
     }
 }

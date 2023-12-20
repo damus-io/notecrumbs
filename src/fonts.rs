@@ -1,7 +1,6 @@
 // TODO: figure out the custom font situation
 
-/*
-fn setup_fonts(font_data: &egui::FontData, ctx: &egui::Context) {
+pub fn setup_fonts(font_data: &egui::FontData, ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
     // Install my own font (maybe supporting non-latin characters).
@@ -20,4 +19,3 @@ fn setup_fonts(font_data: &egui::FontData, ctx: &egui::Context) {
     // Tell egui to use these fonts:
     ctx.set_fonts(fonts);
 }
-*/

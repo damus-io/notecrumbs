@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 
 use crate::error::Error;
+use crate::render::NoteRenderData;
 use nostr_sdk::prelude::*;
 use nostrdb::{Config, Ndb, Transaction};
 use std::time::Duration;
@@ -19,28 +20,32 @@ use std::time::Duration;
 use lru::LruCache;
 
 mod error;
+mod fonts;
+mod gradient;
 mod nip19;
 mod pfp;
 mod render;
 
-pub enum Target {
-    Profile(XOnlyPublicKey),
-    Event(EventId),
-}
-
 type ImageCache = LruCache<XOnlyPublicKey, egui::TextureHandle>;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Notecrumbs {
     ndb: Ndb,
     keys: Keys,
+    font_data: egui::FontData,
     img_cache: Arc<ImageCache>,
+    default_pfp: egui::ImageData,
 
     /// How long do we wait for remote note requests
     timeout: Duration,
 }
 
-async fn find_note(app: &Notecrumbs, nip19: &Nip19) -> Result<nostr_sdk::Event, Error> {
+pub struct FindNoteResult {
+    note: Option<Event>,
+    profile: Option<Event>,
+}
+
+pub async fn find_note(app: &Notecrumbs, nip19: &Nip19) -> Result<FindNoteResult, Error> {
     let opts = Options::new().shutdown_on_drop(true);
     let client = Client::with_opts(&app.keys, opts);
 
@@ -59,16 +64,28 @@ async fn find_note(app: &Notecrumbs, nip19: &Nip19) -> Result<nostr_sdk::Event, 
         .req_events_of(filters.clone(), Some(app.timeout))
         .await;
 
+    let mut note: Option<Event> = None;
+    let mut profile: Option<Event> = None;
+
     loop {
         match client.notifications().recv().await? {
             RelayPoolNotification::Event(_url, ev) => {
-                info!("got ev: {:?}", ev);
-                return Ok(ev);
+                debug!("got event 1 {:?}", ev);
+                note = Some(ev);
+                return Ok(FindNoteResult { note, profile });
             }
             RelayPoolNotification::RelayStatus { .. } => continue,
             RelayPoolNotification::Message(_url, msg) => match msg {
-                RelayMessage::Event { event, .. } => return Ok(*event),
-                RelayMessage::EndOfStoredEvents(_) => return Err(Error::NotFound),
+                RelayMessage::Event { event, .. } => {
+                    if event.kind == Kind::Metadata {
+                        debug!("got profile {:?}", event);
+                        profile = Some(*event);
+                    } else {
+                        debug!("got event {:?}", event);
+                        note = Some(*event);
+                    }
+                }
+                RelayMessage::EndOfStoredEvents(_) => return Ok(FindNoteResult { note, profile }),
                 _ => continue,
             },
             RelayPoolNotification::Stop | RelayPoolNotification::Shutdown => {
@@ -91,66 +108,22 @@ async fn serve(
         }
     };
 
-    let target = match nip19::to_target(&nip19) {
-        Some(target) => target,
-        None => {
-            return Ok(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Full::new(Bytes::from("\n")))?)
-        }
-    };
-
-    let content = {
-        let mut txn = Transaction::new(&app.ndb)?;
-        match target {
-            Target::Profile(pk) => app
-                .ndb
-                .get_profile_by_pubkey(&mut txn, &pk.serialize())
-                .and_then(|n| {
-                    info!("profile cache hit {:?}", nip19);
-                    Ok(n.record
-                        .profile()
-                        .ok_or(nostrdb::Error::NotFound)?
-                        .name()
-                        .ok_or(nostrdb::Error::NotFound)?
-                        .to_string())
-                }),
-            Target::Event(evid) => app
-                .ndb
-                .get_note_by_id(&mut txn, evid.as_bytes().try_into()?)
-                .map(|n| {
-                    info!("event cache hit {:?}", nip19);
-                    n.content().to_string()
-                }),
-        }
-    };
-
-    let content = match content {
-        Ok(content) => content,
-        Err(nostrdb::Error::NotFound) => {
-            debug!("Finding {:?}", nip19);
-            match find_note(app, &nip19).await {
-                Ok(note) => {
-                    let _ = app
-                        .ndb
-                        .process_event(&json!(["EVENT", "s", note]).to_string());
-                    note.content
-                }
-                Err(_err) => {
-                    return Ok(Response::builder().status(StatusCode::NOT_FOUND).body(
-                        Full::new(Bytes::from(format!("noteid {:?} not found\n", nip19))),
-                    )?);
-                }
-            }
-        }
+    // render_data is always returned, it just might be empty
+    let partial_render_data = match render::get_render_data(&app, &nip19) {
         Err(err) => {
             return Ok(Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Full::new(Bytes::from(format!("{}\n", err))))?);
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::new(Bytes::from(
+                    "nsecs are not supported, what were you thinking!?\n",
+                )))?);
         }
+        Ok(render_data) => render_data,
     };
 
-    let data = render::render_note(&app, &content);
+    // fetch extra data if we are missing it
+    let render_data = partial_render_data.complete(&app, &nip19).await;
+
+    let data = render::render_note(&app, &render_data);
 
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "image/png")
@@ -162,6 +135,33 @@ fn get_env_timeout() -> Duration {
     let timeout_env = std::env::var("TIMEOUT_MS").unwrap_or("2000".to_string());
     let timeout_ms: u64 = timeout_env.parse().unwrap_or(2000);
     Duration::from_millis(timeout_ms)
+}
+
+fn get_gradient() -> egui::ColorImage {
+    use egui::{pos2, Color32, ColorImage};
+    use gradient::Gradient;
+
+    //let gradient = Gradient::linear(Color32::LIGHT_GRAY, Color32::DARK_GRAY);
+    let size = pfp::PFP_SIZE as usize;
+    let radius = (pfp::PFP_SIZE as f32) / 2.0;
+    let center = pos2(radius, radius);
+    let start_color = Color32::from_rgb(0x1E, 0x55, 0xFF);
+    let end_color = Color32::from_rgb(0xFA, 0x0D, 0xD4);
+
+    let gradient = Gradient::radial_alpha_gradient(center, radius, start_color, end_color);
+    let pixels = gradient.to_pixel_row();
+
+    assert_eq!(pixels.len(), size * size);
+    ColorImage {
+        size: [size, size],
+        pixels,
+    }
+}
+
+fn get_default_pfp() -> egui::ColorImage {
+    let img = std::fs::read("assets/default_pfp_2.png").expect("default pfp missing");
+    let mut dyn_image = image::load_from_memory(&img).expect("failed to load default pfp");
+    pfp::process_pfp_bitmap(&mut dyn_image)
 }
 
 #[tokio::main]
@@ -181,11 +181,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let keys = Keys::generate();
     let timeout = get_env_timeout();
     let img_cache = Arc::new(LruCache::new(std::num::NonZeroUsize::new(64).unwrap()));
+    let default_pfp = egui::ImageData::Color(Arc::new(get_default_pfp()));
+    //let default_pfp = egui::ImageData::Color(get_gradient());
+    let font_data = egui::FontData::from_static(include_bytes!("../fonts/NotoSans-Regular.ttf"));
+
     let app = Notecrumbs {
         ndb,
         keys,
         timeout,
         img_cache,
+        font_data,
+        default_pfp,
     };
 
     // We start a loop to continuously accept incoming connections

@@ -3,16 +3,6 @@ use crate::Target;
 use nostr_sdk::nips::nip19::Nip19;
 use nostr_sdk::prelude::*;
 
-pub fn to_target(nip19: &Nip19) -> Option<Target> {
-    match nip19 {
-        Nip19::Event(ev) => Some(Target::Event(ev.event_id)),
-        Nip19::EventId(evid) => Some(Target::Event(*evid)),
-        Nip19::Profile(prof) => Some(Target::Profile(prof.public_key)),
-        Nip19::Pubkey(pk) => Some(Target::Profile(*pk)),
-        Nip19::Secret(_) => None,
-    }
-}
-
 pub fn to_filters(nip19: &Nip19) -> Result<Vec<Filter>, Error> {
     match nip19 {
         Nip19::Event(ev) => {

@@ -1,5 +1,10 @@
+use crate::Error;
+use bytes::Bytes;
 use egui::{Color32, ColorImage};
+use hyper::body::Incoming;
 use image::imageops::FilterType;
+
+pub const PFP_SIZE: u32 = 64;
 
 // Thank to gossip for this one!
 pub fn round_image(image: &mut ColorImage) {
@@ -49,9 +54,11 @@ pub fn round_image(image: &mut ColorImage) {
     }
 }
 
-fn process_pfp_bitmap(size: u32, image: &mut image::DynamicImage) -> ColorImage {
+pub fn process_pfp_bitmap(image: &mut image::DynamicImage) -> ColorImage {
     #[cfg(features = "profiling")]
     puffin::profile_function!();
+
+    let size = PFP_SIZE;
 
     // Crop square
     let smaller = image.width().min(image.height());
@@ -74,4 +81,92 @@ fn process_pfp_bitmap(size: u32, image: &mut image::DynamicImage) -> ColorImage 
     );
     round_image(&mut color_image);
     color_image
+}
+
+async fn fetch_url(url: &str) -> Result<(Vec<u8>, hyper::Response<Incoming>), Error> {
+    use http_body_util::BodyExt;
+    use http_body_util::Empty;
+    use hyper::Request;
+    use hyper_util::rt::tokio::TokioIo;
+    use tokio::net::TcpStream;
+
+    let mut data: Vec<u8> = vec![];
+    let url = url.parse::<hyper::Uri>()?;
+    let host = url.host().expect("uri has no host");
+    let port = url.port_u16().unwrap_or(80);
+    let addr = format!("{}:{}", host, port);
+    let stream = TcpStream::connect(addr).await?;
+    let io = TokioIo::new(stream);
+
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+    tokio::task::spawn(async move {
+        if let Err(err) = conn.await {
+            println!("Connection failed: {:?}", err);
+        }
+    });
+
+    let authority = url.authority().unwrap().clone();
+
+    let req = Request::builder()
+        .uri(url)
+        .header(hyper::header::HOST, authority.as_str())
+        .body(Empty::<Bytes>::new())?;
+
+    let mut res: hyper::Response<Incoming> = sender.send_request(req).await?;
+
+    // Stream the body, writing each chunk to stdout as we get it
+    // (instead of buffering and printing at the end).
+    while let Some(next) = res.frame().await {
+        let frame = next?;
+        if let Some(chunk) = frame.data_ref() {
+            if data.len() + chunk.len() > 52428800
+            /* 50 MiB */
+            {
+                return Err(Error::TooBig);
+            }
+            data.extend(chunk);
+        }
+    }
+
+    Ok((data, res))
+}
+
+pub async fn fetch_pfp(url: &str) -> Result<ColorImage, Error> {
+    let (data, res) = fetch_url(url).await?;
+    parse_img_response(data, res)
+}
+
+fn parse_img_response(
+    data: Vec<u8>,
+    response: hyper::Response<Incoming>,
+) -> Result<ColorImage, Error> {
+    use egui_extras::image::FitTo;
+
+    #[cfg(feature = "profiling")]
+    puffin::profile_function!();
+
+    let content_type = response.headers()["content-type"]
+        .to_str()
+        .unwrap_or_default();
+
+    let size = PFP_SIZE;
+
+    if content_type.starts_with("image/svg") {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("load_svg");
+
+        let mut color_image = egui_extras::image::load_svg_bytes_with_size(
+            &data,
+            FitTo::Size(size as u32, size as u32),
+        )?;
+        round_image(&mut color_image);
+        Ok(color_image)
+    } else if content_type.starts_with("image/") {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("load_from_memory");
+        let mut dyn_image = image::load_from_memory(&data)?;
+        Ok(process_pfp_bitmap(&mut dyn_image))
+    } else {
+        Err(Error::InvalidProfilePic)
+    }
 }

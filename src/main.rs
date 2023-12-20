@@ -8,10 +8,12 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use log::{debug, info};
+use std::io::Write;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
 use crate::error::Error;
+use crate::render::RenderData;
 use nostr_sdk::prelude::*;
 use nostrdb::{Config, Ndb};
 use std::time::Duration;
@@ -94,11 +96,127 @@ pub async fn find_note(app: &Notecrumbs, nip19: &Nip19) -> Result<FindNoteResult
     }
 }
 
+#[inline]
+pub fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        s.len()
+    } else {
+        let lower_bound = index.saturating_sub(3);
+        let new_index = s.as_bytes()[lower_bound..=index]
+            .iter()
+            .rposition(|b| is_utf8_char_boundary(*b));
+
+        // SAFETY: we know that the character boundary will be within four bytes
+        unsafe { lower_bound + new_index.unwrap_unchecked() }
+    }
+}
+
+#[inline]
+fn is_utf8_char_boundary(c: u8) -> bool {
+    // This is bit magic equivalent to: b < 128 || b >= 192
+    (c as i8) >= -0x40
+}
+
+fn abbreviate<'a>(text: &'a str, len: usize) -> &'a str {
+    let closest = floor_char_boundary(text, len);
+    &text[..closest]
+}
+
+fn serve_profile_html(
+    app: &Notecrumbs,
+    nip: &Nip19,
+    profile: &render::ProfileRenderData,
+    r: Request<hyper::body::Incoming>,
+) -> Result<Response<Full<Bytes>>, Error> {
+    let mut data = Vec::new();
+    write!(data, "TODO: profile pages\n");
+
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "text/html")
+        .status(StatusCode::OK)
+        .body(Full::new(Bytes::from(data)))?)
+}
+
+fn serve_note_html(
+    app: &Notecrumbs,
+    nip19: &Nip19,
+    note: &render::NoteRenderData,
+    r: Request<hyper::body::Incoming>,
+) -> Result<Response<Full<Bytes>>, Error> {
+    let mut data = Vec::new();
+
+    // indices
+    //
+    // 0: name
+    // 1: abbreviated description
+    // 2: hostname
+    // 3: bech32 entity
+    // 4: Full content
+
+    let hostname = "https://damus.io";
+    let abbrev_content = abbreviate(&note.note.content, 20);
+    let content = &note.note.content;
+
+    write!(
+        data,
+        r#"
+        <html>
+        <head>
+          <title>{0}: {1}</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <meta charset="UTF-8">
+
+          <meta property="og:title" content="{0}"/>
+          <meta property="og:description" content="{1}"/>
+          <meta property="og:image" content="{2}/{3}.png"/>
+          <meta property="og:url" content="{2}/{3}"/>
+          <meta name="og:type" content="website"/>
+          <meta name="twitter:card" content="summary"/>
+          <meta name="twitter:image:src" content="{2}/{3}.png" />
+          <meta name="twitter:site" content="@damusapp" />
+          <meta name="twitter:card" content="summary_large_image" />
+          <meta name="twitter:title" content="{0}: {1}" />
+          <meta name="twitter:description" content="{4}" />
+          <meta property="og:image:alt" content="{0}: {1}" />
+          <meta property="og:image:width" content="1200" />
+          <meta property="og:image:height" content="630" />
+          <meta property="og:site_name" content="Damus" />
+          <meta property="og:type" content="object" />
+          <meta property="og:title" content="{0}: {1}" />
+          <meta property="og:url" content="{2}/{3}" />
+          <meta property="og:description" content="{4}" />
+      
+        </head>
+        <body>
+          <h3>Note!</h3>
+          <div class="note">
+              <div class="note-content">{4}</div>
+          </div>
+        </body>
+        </html>
+        "#,
+        note.profile.name,
+        abbrev_content,
+        hostname,
+        nip19.to_bech32().unwrap(),
+        content
+    );
+
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "text/html")
+        .status(StatusCode::OK)
+        .body(Full::new(Bytes::from(data)))?)
+}
+
 async fn serve(
     app: &Notecrumbs,
     r: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, Error> {
-    let nip19 = match Nip19::from_bech32(&r.uri().to_string()[1..]) {
+    let is_png = r.uri().path().ends_with(".png");
+    let until = if is_png { 4 } else { 0 };
+
+    let path_len = r.uri().path().len();
+    let nip19 = match Nip19::from_bech32(&r.uri().path()[1..path_len - until]) {
         Ok(nip19) => nip19,
         Err(_) => {
             return Ok(Response::builder()
@@ -122,12 +240,19 @@ async fn serve(
     // fetch extra data if we are missing it
     let render_data = partial_render_data.complete(&app, &nip19).await;
 
-    let data = render::render_note(&app, &render_data);
+    if is_png {
+        let data = render::render_note(&app, &render_data);
 
-    Ok(Response::builder()
-        .header(header::CONTENT_TYPE, "image/png")
-        .status(StatusCode::OK)
-        .body(Full::new(Bytes::from(data)))?)
+        Ok(Response::builder()
+            .header(header::CONTENT_TYPE, "image/png")
+            .status(StatusCode::OK)
+            .body(Full::new(Bytes::from(data)))?)
+    } else {
+        match render_data {
+            RenderData::Note(note_rd) => serve_note_html(app, &nip19, &note_rd, r),
+            RenderData::Profile(profile_rd) => serve_profile_html(app, &nip19, &profile_rd, r),
+        }
+    }
 }
 
 fn get_env_timeout() -> Duration {

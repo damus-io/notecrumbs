@@ -18,24 +18,24 @@ impl ProfileRenderData {
 
 #[derive(Debug, Clone)]
 pub struct NoteData {
-    content: String,
+    pub content: String,
 }
 
 pub struct ProfileRenderData {
-    name: String,
-    display_name: Option<String>,
-    about: String,
-    pfp: egui::ImageData,
+    pub name: String,
+    pub display_name: Option<String>,
+    pub about: String,
+    pub pfp: egui::ImageData,
 }
 
 pub struct NoteRenderData {
-    note: NoteData,
-    profile: ProfileRenderData,
+    pub note: NoteData,
+    pub profile: ProfileRenderData,
 }
 
 pub struct PartialNoteRenderData {
-    note: Option<NoteData>,
-    profile: Option<ProfileRenderData>,
+    pub note: Option<NoteData>,
+    pub profile: Option<ProfileRenderData>,
 }
 
 pub enum PartialRenderData {

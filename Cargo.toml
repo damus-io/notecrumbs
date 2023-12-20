@@ -19,8 +19,8 @@ nostr-sdk = { git = "https://github.com/damus-io/nostr-sdk.git", rev = "fc0dc7b3
 hex = "0.4.3"
 egui = "0.23.0"
 egui_extras = { version = "0.23.0", features = ["image", "svg"] }
-#egui_skia = { git = "https://github.com/jb55/egui_skia.git", rev = "33b2ed6ae7fe8eedb727302d56e13b25526d1e82", features = ["cpu_fix"] }
-egui_skia = { path = "/home/jb55/dev/github/lucasmerlin/egui_skia", features = ["cpu_fix"] }
+egui_skia = { git = "https://github.com/jb55/egui_skia.git", rev = "6205d63e751d3acfcf6d43908c27a82d59706038", features = ["cpu_fix"] }
+#egui_skia = { path = "/home/jb55/dev/github/lucasmerlin/egui_skia", features = ["cpu_fix"] }
 skia-safe = "0.58.0"
 image = "0.24.7"
 lru = "0.12.1"

@@ -163,7 +163,7 @@ fn serve_note_html(
         r#"
         <html>
         <head>
-          <title>{0}: {1}</title>
+          <title>{0} on nostr</title>
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <meta charset="UTF-8">
 
@@ -174,13 +174,13 @@ fn serve_note_html(
           <meta property="og:image:width" content="1200" />
           <meta property="og:image:type" content="image/png" />
           <meta property="og:site_name" content="Damus" />
-          <meta property="og:title" content="{0}: {1}" />
+          <meta property="og:title" content="{0} on nostr" />
           <meta property="og:url" content="{2}/{3}"/>
           <meta name="og:type" content="website"/>
           <meta name="twitter:image:src" content="{2}/{3}.png" />
           <meta name="twitter:site" content="@damusapp" />
           <meta name="twitter:card" content="summary_large_image" />
-          <meta name="twitter:title" content="{0}: {1}" />
+          <meta name="twitter:title" content="{0} on nostr" />
           <meta name="twitter:description" content="{1}" />
       
         </head>

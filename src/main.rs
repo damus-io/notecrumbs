@@ -36,6 +36,7 @@ pub struct Notecrumbs {
     font_data: egui::FontData,
     img_cache: Arc<ImageCache>,
     default_pfp: egui::ImageData,
+    background: egui::ImageData,
 
     /// How long do we wait for remote note requests
     timeout: Duration,
@@ -265,15 +266,25 @@ fn get_gradient() -> egui::ColorImage {
     let size = pfp::PFP_SIZE as usize;
     let radius = (pfp::PFP_SIZE as f32) / 2.0;
     let center = pos2(radius, radius);
-    let start_color = Color32::from_rgb(0x1E, 0x55, 0xFF);
-    let end_color = Color32::from_rgb(0xFA, 0x0D, 0xD4);
 
-    let gradient = Gradient::radial_alpha_gradient(center, radius, start_color, end_color);
+    let scol = [0x1C, 0x55, 0xFF];
+    //let ecol = [0xFA, 0x0D, 0xD4];
+    let mcol = [0x7F, 0x35, 0xAB];
+    //let ecol = [0xFF, 0x0B, 0xD6];
+    let ecol = [0xC0, 0x2A, 0xBE];
+
+    // TODO: skia has r/b colors swapped for some reason, fix this
+    let start_color = Color32::from_rgb(scol[2], scol[1], scol[0]);
+    let mid_color = Color32::from_rgb(mcol[2], mcol[1], mcol[0]);
+    let end_color = Color32::from_rgb(ecol[2], ecol[1], ecol[0]);
+
+    let gradient = Gradient::linear_many(vec![start_color, mid_color, end_color]);
     let pixels = gradient.to_pixel_row();
+    let width = pixels.len();
+    let height = 1;
 
-    assert_eq!(pixels.len(), size * size);
     ColorImage {
-        size: [size, size],
+        size: [width, height],
         pixels,
     }
 }
@@ -302,7 +313,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let timeout = get_env_timeout();
     let img_cache = Arc::new(LruCache::new(std::num::NonZeroUsize::new(64).unwrap()));
     let default_pfp = egui::ImageData::Color(Arc::new(get_default_pfp()));
-    //let default_pfp = egui::ImageData::Color(get_gradient());
+    let background = egui::ImageData::Color(Arc::new(get_gradient()));
     let font_data = egui::FontData::from_static(include_bytes!("../fonts/NotoSans-Regular.ttf"));
 
     let app = Notecrumbs {
@@ -310,6 +321,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         keys,
         timeout,
         img_cache,
+        background,
         font_data,
         default_pfp,
     };

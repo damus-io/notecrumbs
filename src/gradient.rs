@@ -19,6 +19,31 @@ impl Gradient {
         )
     }
 
+    pub fn linear_many(colors: Vec<Color32>) -> Self {
+        if colors.is_empty() {
+            return Self(Vec::new());
+        }
+        if colors.len() == 1 {
+            return Self(vec![colors[0]; 256]);
+        }
+
+        let n = 255;
+        let mut result = Vec::new();
+        let segments = colors.len() - 1;
+
+        for i in 0..segments {
+            let left = Rgba::from(colors[i]);
+            let right = Rgba::from(colors[i + 1]);
+
+            for j in 0..=n {
+                let t = j as f32 / n as f32;
+                result.push(Color32::from(lerp(left..=right, t)));
+            }
+        }
+
+        Self(result)
+    }
+
     pub fn radial_alpha_gradient(
         center: Pos2,
         radius: f32,

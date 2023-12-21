@@ -1,9 +1,14 @@
 use crate::{fonts, Error, Notecrumbs};
-use egui::{Color32, FontId, RichText, Rounding, Vec2, Visuals};
+use egui::emath::Rot2;
+use egui::epaint::Shadow;
+use egui::{
+    pos2, Color32, FontId, Mesh, Rect, RichText, Rounding, Shape, TextureHandle, Vec2, Visuals,
+};
 use log::{debug, info, warn};
 use nostr_sdk::nips::nip19::Nip19;
 use nostr_sdk::prelude::*;
 use nostrdb::{Note, Transaction};
+use std::f32::consts::PI;
 
 impl ProfileRenderData {
     pub fn default(pfp: egui::ImageData) -> Self {
@@ -274,7 +279,7 @@ fn render_username(ui: &mut egui::Ui, profile: &ProfileRenderData) {
     #[cfg(feature = "profiling")]
     puffin::profile_function!();
     let name = format!("@{}", profile.name);
-    ui.label(RichText::new(&name).size(30.0).color(Color32::DARK_GRAY));
+    ui.label(RichText::new(&name).size(40.0).color(Color32::LIGHT_GRAY));
 }
 
 fn setup_visuals(font_data: &egui::FontData, ctx: &egui::Context) {
@@ -288,10 +293,10 @@ fn wrapped_body(ui: &mut egui::Ui, text: &str) {
     use egui::text::{LayoutJob, TextFormat};
 
     let format = TextFormat {
-        font_id: FontId::proportional(40.0),
+        font_id: FontId::proportional(52.0),
         color: Color32::WHITE,
-        extra_letter_spacing: -1.0,
-        line_height: Some(40.0),
+        extra_letter_spacing: -3.0,
+        line_height: Some(50.0),
         ..Default::default()
     };
 
@@ -300,7 +305,7 @@ fn wrapped_body(ui: &mut egui::Ui, text: &str) {
     job.justify = false;
     job.halign = egui::Align::LEFT;
     job.wrap = egui::text::TextWrapping {
-        max_rows: 5,
+        max_rows: 4,
         break_anywhere: false,
         overflow_character: Some('…'),
         ..Default::default()
@@ -338,14 +343,15 @@ fn note_frame_align() -> egui::Layout {
 fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
     setup_visuals(&app.font_data, ctx);
 
-    let outer_margin = 40.0;
-    let inner_margin = 60.0;
+    let outer_margin = 60.0;
+    let inner_margin = 40.0;
     let canvas_width = 1200.0;
     let canvas_height = 600.0;
     //let canvas_size = Vec2::new(canvas_width, canvas_height);
 
     let total_margin = outer_margin + inner_margin;
     let pfp = ctx.load_texture("pfp", note.profile.pfp.clone(), Default::default());
+    let bg = ctx.load_texture("background", app.background.clone(), Default::default());
 
     /*
     let desired_height = canvas_height - total_margin * 2.0;
@@ -356,10 +362,19 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
     */
 
     egui::CentralPanel::default()
-        .frame(egui::Frame::default().fill(Color32::from_rgb(0x43, 0x20, 0x62)))
+        .frame(
+            egui::Frame::default()
+                //.fill(Color32::from_rgb(0x43, 0x20, 0x62)
+                .fill(Color32::from_rgb(0x00, 0x00, 0x00)),
+        )
         .show(&ctx, |ui| {
+            background_texture(ui, &bg);
             egui::Frame::none()
                 .fill(Color32::from_rgb(0x0F, 0x0F, 0x0F))
+                .shadow(Shadow {
+                    extrusion: 50.0,
+                    color: Color32::from_black_alpha(60),
+                })
                 .rounding(Rounding::same(20.0))
                 .outer_margin(outer_margin)
                 .inner_margin(inner_margin)
@@ -375,12 +390,12 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
 
                         ui.horizontal(|ui| {
                             ui.with_layout(right_aligned(), |ui| {
-                                ui.label(RichText::new("damus.io").size(20.0));
+                                ui.label(RichText::new("damus.io").size(40.0));
                             });
                         });
 
                         ui.vertical(|ui| {
-                            ui.set_max_size(Vec2::new(desired_width, desired_height / 1.8));
+                            ui.set_max_size(Vec2::new(desired_width, desired_height / 2.2));
                             ui.centered_and_justified(|ui| {
                                 // only one widget is allowed in here
                                 wrapped_body(ui, &note.note.content);
@@ -397,14 +412,46 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
         });
 }
 
+fn background_texture(ui: &mut egui::Ui, texture: &TextureHandle) {
+    // Get the size of the panel
+    let size = ui.available_size();
+
+    // Create a rectangle for the texture
+    let rect = Rect::from_min_size(ui.min_rect().min, size);
+
+    // Get the current layer ID
+    let layer_id = ui.layer_id();
+
+    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    //let uv_skewed = Rect::from_min_max(uv.min, pos2(uv.max.x, uv.max.y * 0.5));
+
+    // Get the painter and draw the texture
+    let painter = ui.ctx().layer_painter(layer_id);
+    let tint = Color32::WHITE;
+
+    let mut mesh = Mesh::with_texture(texture.into());
+
+    // Define vertices for a rectangle
+    mesh.add_rect_with_uv(rect, uv, Color32::WHITE);
+
+    //let origin = pos2(600.0, 300.0);
+    //let angle = Rot2::from_angle(45.0);
+    //mesh.rotate(angle, origin);
+
+    // Draw the mesh
+    painter.add(Shape::mesh(mesh));
+
+    //painter.image(texture.into(), rect, uv_skewed, tint);
+}
+
 fn discuss_on_damus(ui: &mut egui::Ui) {
     let button = egui::Button::new(
         RichText::new("Discuss on Damus ➡")
-            .size(20.0)
+            .size(30.0)
             .color(Color32::BLACK),
     )
     .rounding(50.0)
-    .min_size(Vec2::new(305.0, 64.0))
+    .min_size(Vec2::new(330.0, 75.0))
     .fill(Color32::WHITE);
 
     ui.add(button);

@@ -4,5 +4,6 @@ data.mdb
 lock.mdb
 .build-result
 .buildcmd
+/fonts
 tags
 perf.data

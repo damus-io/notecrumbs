@@ -21,6 +21,7 @@ pub fn to_filters(nip19: &Nip19) -> Result<Vec<Filter>, Error> {
             .kind(Kind::Metadata)
             .limit(1)]),
         Nip19::Secret(_sec) => Err(Error::InvalidNip19),
+        Nip19::Coordinate(_coord) => Err(Error::InvalidNip19),
     }
 }
 

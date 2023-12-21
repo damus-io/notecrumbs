@@ -272,6 +272,7 @@ pub fn get_render_data(app: &Notecrumbs, target: &Nip19) -> Result<PartialRender
         )?)),
 
         Nip19::Secret(_nsec) => Err(Error::InvalidNip19),
+        Nip19::Coordinate(_coord) => Err(Error::InvalidNip19),
     }
 }
 

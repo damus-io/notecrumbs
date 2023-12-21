@@ -72,13 +72,13 @@ pub async fn find_note(app: &Notecrumbs, nip19: &Nip19) -> Result<FindNoteResult
 
     loop {
         match client.notifications().recv().await? {
-            RelayPoolNotification::Event(_url, ev) => {
-                debug!("got event 1 {:?}", ev);
-                note = Some(ev);
+            RelayPoolNotification::Event { event, .. } => {
+                debug!("got event 1 {:?}", event);
+                note = Some(event);
                 return Ok(FindNoteResult { note, profile });
             }
             RelayPoolNotification::RelayStatus { .. } => continue,
-            RelayPoolNotification::Message(_url, msg) => match msg {
+            RelayPoolNotification::Message { message, .. } => match message {
                 RelayMessage::Event { event, .. } => {
                     if event.kind == Kind::Metadata {
                         debug!("got profile {:?}", event);

@@ -295,7 +295,7 @@ fn wrapped_body(ui: &mut egui::Ui, text: &str) {
     let format = TextFormat {
         font_id: FontId::proportional(52.0),
         color: Color32::WHITE,
-        extra_letter_spacing: -3.0,
+        extra_letter_spacing: -2.5,
         line_height: Some(50.0),
         ..Default::default()
     };
@@ -390,7 +390,7 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
 
                         ui.horizontal(|ui| {
                             ui.with_layout(right_aligned(), |ui| {
-                                ui.label(RichText::new("damus.io").size(40.0));
+                                ui.label(RichText::new("damus.io").size(30.0));
                             });
                         });
 

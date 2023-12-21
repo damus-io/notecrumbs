@@ -283,7 +283,7 @@ fn get_gradient() -> egui::ColorImage {
 }
 
 fn get_default_pfp() -> egui::ColorImage {
-    let img = std::fs::read("assets/default_pfp_2.png").expect("default pfp missing");
+    let img = std::fs::read("assets/default_pfp.jpg").expect("default pfp missing");
     let mut dyn_image = image::load_from_memory(&img).expect("failed to load default pfp");
     pfp::process_pfp_bitmap(&mut dyn_image)
 }

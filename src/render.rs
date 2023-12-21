@@ -396,7 +396,9 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
                         });
 
                         ui.vertical(|ui| {
-                            ui.set_max_size(Vec2::new(desired_width, desired_height / 2.2));
+                            let desired = Vec2::new(desired_width, desired_height / 2.2);
+                            ui.set_max_size(desired);
+                            ui.set_min_size(desired);
                             // only one widget is allowed in here
                             wrapped_body(ui, &note.note.content);
                         });

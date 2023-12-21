@@ -1367,8 +1367,9 @@ dependencies = [
 
 [[package]]
 name = "nostr"
-version = "0.25.0"
-source = "git+https://github.com/damus-io/nostr-sdk.git?rev=fc0dc7b38f5060f171228b976b9700c0135245d3#fc0dc7b38f5060f171228b976b9700c0135245d3"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72adfa99eb5f1e5afa3f1fe6503c89989b7b0b61c4e5ec23c5b839967cd54da1"
 dependencies = [
  "aes",
  "base64 0.21.5",
@@ -1389,8 +1390,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-database"
-version = "0.1.0"
-source = "git+https://github.com/damus-io/nostr-sdk.git?rev=fc0dc7b38f5060f171228b976b9700c0135245d3#fc0dc7b38f5060f171228b976b9700c0135245d3"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "569f72670f79c10437eed69325b5b10ac69a1e23c2ee45d7d5781e6ec791cbce"
 dependencies = [
  "async-trait",
  "nostr",
@@ -1402,8 +1404,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-sdk"
-version = "0.25.0"
-source = "git+https://github.com/damus-io/nostr-sdk.git?rev=fc0dc7b38f5060f171228b976b9700c0135245d3#fc0dc7b38f5060f171228b976b9700c0135245d3"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a96ff1b1be7872abe0f6c0e151c2a1fd45b374756f05f2c00e328b003333f0c5"
 dependencies = [
  "async-utility",
  "nostr",
@@ -1417,8 +1420,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-sdk-net"
-version = "0.25.0"
-source = "git+https://github.com/damus-io/nostr-sdk.git?rev=fc0dc7b38f5060f171228b976b9700c0135245d3#fc0dc7b38f5060f171228b976b9700c0135245d3"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7eccf4d9be57b513f5ee77e1931bf2fbf02da8ca1edae1feb001558e1e23332"
 dependencies = [
  "futures-util",
  "thiserror",

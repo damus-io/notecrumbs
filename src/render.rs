@@ -295,7 +295,7 @@ fn wrapped_body(ui: &mut egui::Ui, text: &str) {
     let format = TextFormat {
         font_id: FontId::proportional(52.0),
         color: Color32::WHITE,
-        extra_letter_spacing: -2.5,
+        extra_letter_spacing: 0.0,
         line_height: Some(50.0),
         ..Default::default()
     };

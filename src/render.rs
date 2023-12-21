@@ -341,7 +341,7 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
     let outer_margin = 40.0;
     let inner_margin = 60.0;
     let canvas_width = 1200.0;
-    let canvas_height = 630.0;
+    let canvas_height = 600.0;
     //let canvas_size = Vec2::new(canvas_width, canvas_height);
 
     let total_margin = outer_margin + inner_margin;
@@ -436,13 +436,13 @@ pub fn render_note(app: &Notecrumbs, render_data: &RenderData) -> Vec<u8> {
 
     let mut surface = match render_data {
         RenderData::Note(note_render_data) => rasterize(
-            (1200, 630),
+            (1200, 600),
             |ctx| note_ui(app, ctx, note_render_data),
             Some(options),
         ),
 
         RenderData::Profile(profile_render_data) => rasterize(
-            (1200, 630),
+            (1200, 600),
             |ctx| profile_ui(app, ctx, profile_render_data),
             Some(options),
         ),

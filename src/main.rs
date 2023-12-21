@@ -166,25 +166,21 @@ fn serve_note_html(
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <meta charset="UTF-8">
 
-          <meta property="og:title" content="{0}"/>
-          <meta property="og:description" content="{1}"/>
+          <meta property="og:description" content="{1}" />
           <meta property="og:image" content="{2}/{3}.png"/>
+          <meta property="og:image:alt" content="{0}: {1}" />
+          <meta property="og:image:height" content="600" />
+          <meta property="og:image:width" content="1200" />
+          <meta property="og:image:type" content="image/png" />
+          <meta property="og:site_name" content="Damus" />
+          <meta property="og:title" content="{0}: {1}" />
           <meta property="og:url" content="{2}/{3}"/>
           <meta name="og:type" content="website"/>
-          <meta name="twitter:card" content="summary"/>
           <meta name="twitter:image:src" content="{2}/{3}.png" />
           <meta name="twitter:site" content="@damusapp" />
           <meta name="twitter:card" content="summary_large_image" />
           <meta name="twitter:title" content="{0}: {1}" />
-          <meta name="twitter:description" content="{4}" />
-          <meta property="og:image:alt" content="{0}: {1}" />
-          <meta property="og:image:width" content="1200" />
-          <meta property="og:image:height" content="630" />
-          <meta property="og:site_name" content="Damus" />
-          <meta property="og:type" content="object" />
-          <meta property="og:title" content="{0}: {1}" />
-          <meta property="og:url" content="{2}/{3}" />
-          <meta property="og:description" content="{4}" />
+          <meta name="twitter:description" content="{1}" />
       
         </head>
         <body>
@@ -292,11 +288,11 @@ fn get_default_pfp() -> egui::ColorImage {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     env_logger::init();
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
 
     // We create a TcpListener and bind it to 127.0.0.1:3000
     let listener = TcpListener::bind(addr).await?;
-    info!("Listening on 127.0.0.1:3000");
+    info!("Listening on 0.0.0.0:3000");
 
     // Since ndk-sdk will verify for us, we don't need to do it on the db side
     let mut cfg = Config::new();

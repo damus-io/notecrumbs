@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use html_escape;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::header;
@@ -155,8 +156,9 @@ fn serve_note_html(
     // 4: Full content
 
     let hostname = "https://damus.io";
-    let abbrev_content = abbreviate(&note.note.content, 64);
-    let content = &note.note.content;
+    let abbrev_content = html_escape::encode_text(abbreviate(&note.note.content, 64));
+    let content = html_escape::encode_text(&note.note.content);
+    let profile_name = html_escape::encode_text(&note.profile.name);
 
     write!(
         data,
@@ -192,7 +194,7 @@ fn serve_note_html(
         </body>
         </html>
         "#,
-        note.profile.name,
+        profile_name,
         abbrev_content,
         hostname,
         nip19.to_bech32().unwrap(),

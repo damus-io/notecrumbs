@@ -24,5 +24,5 @@ WIP!
 
 Very alpha. The design is still a bit rough, but getting there:
 
-![wip](https://purple.damus.io/nevent1qqstj0wgdgplzypp5fjlg5vdr9mcex5me7elhcvh2trk0836y69q9cgsn6gzr.png)
+<img style="width: 600px; height: 300px" src="https://purple.damus.io/nevent1qqstj0wgdgplzypp5fjlg5vdr9mcex5me7elhcvh2trk0836y69q9cgsn6gzr.png">
 

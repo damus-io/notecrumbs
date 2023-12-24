@@ -52,11 +52,14 @@ pub async fn find_note(app: &Notecrumbs, nip19: &Nip19) -> Result<FindNoteResult
     let opts = Options::new().shutdown_on_drop(true);
     let client = Client::with_opts(&app.keys, opts);
 
-    let _ = client.add_relay("wss://relay.damus.io").await;
+    let mut num_relays: i32 = 2;
+    let _ = client.add_relay("wss://relay.damus.io");
+    let _ = client.add_relay("wss://relay.nostr.band").await;
 
     let other_relays = nip19::to_relays(nip19);
     for relay in other_relays {
         let _ = client.add_relay(relay).await;
+        num_relays += 1;
     }
 
     client.connect().await;
@@ -69,6 +72,7 @@ pub async fn find_note(app: &Notecrumbs, nip19: &Nip19) -> Result<FindNoteResult
 
     let mut note: Option<Event> = None;
     let mut profile: Option<Event> = None;
+    let mut ends: i32 = 0;
 
     loop {
         match client.notifications().recv().await? {
@@ -88,7 +92,13 @@ pub async fn find_note(app: &Notecrumbs, nip19: &Nip19) -> Result<FindNoteResult
                         note = Some(*event);
                     }
                 }
-                RelayMessage::EndOfStoredEvents(_) => return Ok(FindNoteResult { note, profile }),
+                RelayMessage::EndOfStoredEvents(_) => {
+                    ends += 1;
+                    let has_any = note.is_some() || profile.is_some();
+                    if has_any || ends >= num_relays {
+                        return Ok(FindNoteResult { note, profile });
+                    }
+                }
                 _ => continue,
             },
             RelayPoolNotification::Stop | RelayPoolNotification::Shutdown => {

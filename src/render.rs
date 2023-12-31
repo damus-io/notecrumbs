@@ -2,12 +2,15 @@ use crate::{fonts, Error, Notecrumbs};
 use egui::emath::Rot2;
 use egui::epaint::Shadow;
 use egui::{
-    pos2, Color32, FontId, Mesh, Rect, RichText, Rounding, Shape, TextureHandle, Vec2, Visuals,
+    pos2,
+    text::{LayoutJob, TextFormat},
+    Color32, FontFamily, FontId, Mesh, Rect, RichText, Rounding, Shape, TextureHandle, Vec2,
+    Visuals,
 };
 use log::{debug, info, warn};
 use nostr_sdk::nips::nip19::Nip19;
 use nostr_sdk::prelude::*;
-use nostrdb::{Note, Transaction};
+use nostrdb::{BlockType, Blocks, Note, Transaction};
 use std::f32::consts::PI;
 
 impl ProfileRenderData {
@@ -23,6 +26,7 @@ impl ProfileRenderData {
 
 #[derive(Debug, Clone)]
 pub struct NoteData {
+    pub id: Option<[u8; 32]>,
     pub content: String,
 }
 
@@ -90,7 +94,7 @@ impl From<EventId> for EventSource {
 impl NoteData {
     fn default() -> Self {
         let content = "".to_string();
-        NoteData { content }
+        NoteData { content, id: None }
     }
 }
 
@@ -192,12 +196,16 @@ fn get_profile_render_data(
 
 fn ndb_note_to_data(note: &Note) -> NoteData {
     let content = note.content().to_string();
-    NoteData { content }
+    let id = Some(*note.id());
+    NoteData { content, id }
 }
 
 fn sdk_note_to_note_data(note: &Event) -> NoteData {
     let content = note.content.clone();
-    NoteData { content }
+    NoteData {
+        content,
+        id: Some(note.id.to_bytes()),
+    }
 }
 
 fn get_note_render_data(
@@ -290,7 +298,59 @@ fn setup_visuals(font_data: &egui::FontData, ctx: &egui::Context) {
     fonts::setup_fonts(font_data, ctx);
 }
 
-fn wrapped_body(ui: &mut egui::Ui, text: &str) {
+fn wrapped_body_blocks(ui: &mut egui::Ui, note: &Note, blocks: &Blocks) {
+    let size = 50.0;
+
+    let mut job = LayoutJob::default();
+    job.justify = false;
+    job.halign = egui::Align::LEFT;
+    job.wrap = egui::text::TextWrapping {
+        max_rows: 5,
+        break_anywhere: false,
+        overflow_character: Some('…'),
+        ..Default::default()
+    };
+
+    let purple = Color32::from_rgb(0xcc, 0x43, 0xc5);
+
+    for block in blocks.iter(note) {
+        match block.blocktype() {
+            BlockType::Url => job.append(
+                block.as_str(),
+                0.0,
+                TextFormat {
+                    font_id: FontId::new(size, FontFamily::Proportional),
+                    color: purple,
+                    ..Default::default()
+                },
+            ),
+
+            BlockType::Hashtag => job.append(
+                &format!("#{}", block.as_str()),
+                0.0,
+                TextFormat {
+                    font_id: FontId::new(size, FontFamily::Proportional),
+                    color: purple,
+                    ..Default::default()
+                },
+            ),
+
+            _ => job.append(
+                block.as_str(),
+                0.0,
+                TextFormat {
+                    font_id: FontId::new(size, FontFamily::Proportional),
+                    color: Color32::WHITE,
+                    ..Default::default()
+                },
+            ),
+        };
+    }
+
+    ui.label(job);
+}
+
+fn wrapped_body_text(ui: &mut egui::Ui, text: &str) {
     use egui::text::{LayoutJob, TextFormat};
 
     let format = TextFormat {
@@ -302,15 +362,6 @@ fn wrapped_body(ui: &mut egui::Ui, text: &str) {
     };
 
     let mut job = LayoutJob::single_section(text.to_owned(), format);
-
-    job.justify = false;
-    job.halign = egui::Align::LEFT;
-    job.wrap = egui::text::TextWrapping {
-        max_rows: 4,
-        break_anywhere: false,
-        overflow_character: Some('…'),
-        ..Default::default()
-    };
 
     ui.label(job);
 }
@@ -354,14 +405,6 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
     let pfp = ctx.load_texture("pfp", note.profile.pfp.clone(), Default::default());
     let bg = ctx.load_texture("background", app.background.clone(), Default::default());
 
-    /*
-    let desired_height = canvas_height - total_margin * 2.0;
-    let desired_width = canvas_width - total_margin * 2.0;
-    let desired_size = Vec2::new(desired_width, desired_height);
-    ui.set_min_size(desired_size);
-    ui.set_max_size(desired_size);
-    */
-
     egui::CentralPanel::default()
         .frame(
             egui::Frame::default()
@@ -389,18 +432,28 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
                         //egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(10.0, 50.0);
 
-                        ui.horizontal(|ui| {
-                            ui.with_layout(right_aligned(), |ui| {
-                                ui.label(RichText::new("damus.io").size(30.0));
-                            });
-                        });
-
                         ui.vertical(|ui| {
-                            let desired = Vec2::new(desired_width, desired_height / 2.2);
+                            let desired = Vec2::new(desired_width, desired_height / 1.5);
                             ui.set_max_size(desired);
                             ui.set_min_size(desired);
-                            // only one widget is allowed in here
-                            wrapped_body(ui, &note.note.content);
+
+                            let mut rendered = false;
+
+                            let ok = (|| -> Result<(), nostrdb::Error> {
+                                let txn = Transaction::new(&app.ndb)?;
+                                let note_id = note.note.id.ok_or(nostrdb::Error::NotFound)?;
+                                let note = app.ndb.get_note_by_id(&txn, &note_id)?;
+                                let blocks =
+                                    app.ndb.get_blocks_by_key(&txn, note.key().unwrap())?;
+
+                                wrapped_body_blocks(ui, &note, &blocks);
+
+                                Ok(())
+                            })();
+
+                            if let Err(_) = ok {
+                                wrapped_body_text(ui, &note.note.content);
+                            }
                         });
 
                         ui.horizontal(|ui| {

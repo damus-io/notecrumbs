@@ -190,6 +190,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "bindgen"
+version = "0.69.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ffcebc3849946a7170a05992aac39da343a90676ab392c51a4280981d6379c2"
+dependencies = [
+ "bitflags 2.4.1",
+ "cexpr",
+ "clang-sys",
+ "lazy_static",
+ "lazycell",
+ "log",
+ "peeking_take_while",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash",
+ "shlex",
+ "syn 2.0.41",
+ "which",
+]
+
+[[package]]
 name = "bip39"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1437,9 +1460,10 @@ dependencies = [
 
 [[package]]
 name = "nostrdb"
-version = "0.1.5"
-source = "git+https://github.com/damus-io/nostrdb-rs.git?rev=21d0002f5ff62e51c4114e3d15a2ffa4e99b17e8#21d0002f5ff62e51c4114e3d15a2ffa4e99b17e8"
+version = "0.1.6"
+source = "git+https://github.com/damus-io/nostrdb-rs.git?rev=71d7ce19d64e15f364d9908e5e34f0409395054c#71d7ce19d64e15f364d9908e5e34f0409395054c"
 dependencies = [
+ "bindgen 0.69.1",
  "cc",
  "env_logger",
  "flatbuffers",
@@ -1636,6 +1660,16 @@ name = "ppv-lite86"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b40af805b3121feab8a3c29f04d8ad262fa8e0561883e7653e024ae4479e6de"
+
+[[package]]
+name = "prettyplease"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae005bd773ab59b4725093fd7df83fd7892f7d8eafb48dbd7de6e024e4215f9d"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.41",
+]
 
 [[package]]
 name = "proc-macro2"
@@ -2061,7 +2095,7 @@ version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "404d98ffda633acd7a3ea68e0e5f160814ee7ae8942c89d60c53f7e0fae99373"
 dependencies = [
- "bindgen",
+ "bindgen 0.63.0",
  "cc",
  "flate2",
  "heck",

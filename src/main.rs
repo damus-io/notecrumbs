@@ -271,13 +271,14 @@ fn get_env_timeout() -> Duration {
 }
 
 fn get_gradient() -> egui::ColorImage {
-    use egui::{pos2, Color32, ColorImage};
+    use egui::{Color32, ColorImage};
+    //use egui::pos2;
     use gradient::Gradient;
 
     //let gradient = Gradient::linear(Color32::LIGHT_GRAY, Color32::DARK_GRAY);
-    let size = pfp::PFP_SIZE as usize;
-    let radius = (pfp::PFP_SIZE as f32) / 2.0;
-    let center = pos2(radius, radius);
+    //let size = pfp::PFP_SIZE as usize;
+    //let radius = (pfp::PFP_SIZE as f32) / 2.0;
+    //let center = pos2(radius, radius);
 
     let scol = [0x1C, 0x55, 0xFF];
     //let ecol = [0xFA, 0x0D, 0xD4];

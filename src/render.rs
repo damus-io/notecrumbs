@@ -1,5 +1,4 @@
 use crate::{fonts, Error, Notecrumbs};
-use egui::emath::Rot2;
 use egui::epaint::Shadow;
 use egui::{
     pos2,
@@ -9,9 +8,13 @@ use egui::{
 };
 use log::{debug, info, warn};
 use nostr_sdk::nips::nip19::Nip19;
-use nostr_sdk::prelude::*;
-use nostrdb::{BlockType, Blocks, Note, Transaction};
-use std::f32::consts::PI;
+use nostr_sdk::prelude::{json, Event, EventId, Nip19Event, XOnlyPublicKey};
+use nostrdb::{Block, BlockType, Blocks, Mention, Ndb, Note, Transaction};
+
+const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
+
+//use egui::emath::Rot2;
+//use std::f32::consts::PI;
 
 impl ProfileRenderData {
     pub fn default(pfp: egui::ImageData) -> Self {
@@ -351,8 +354,6 @@ fn wrapped_body_blocks(ui: &mut egui::Ui, note: &Note, blocks: &Blocks) {
 }
 
 fn wrapped_body_text(ui: &mut egui::Ui, text: &str) {
-    use egui::text::{LayoutJob, TextFormat};
-
     let format = TextFormat {
         font_id: FontId::proportional(52.0),
         color: Color32::WHITE,
@@ -361,8 +362,7 @@ fn wrapped_body_text(ui: &mut egui::Ui, text: &str) {
         ..Default::default()
     };
 
-    let mut job = LayoutJob::single_section(text.to_owned(), format);
-
+    let job = LayoutJob::single_section(text.to_owned(), format);
     ui.label(job);
 }
 
@@ -437,8 +437,6 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
                             ui.set_max_size(desired);
                             ui.set_min_size(desired);
 
-                            let mut rendered = false;
-
                             let ok = (|| -> Result<(), nostrdb::Error> {
                                 let txn = Transaction::new(&app.ndb)?;
                                 let note_id = note.note.id.ok_or(nostrdb::Error::NotFound)?;
@@ -481,7 +479,7 @@ fn background_texture(ui: &mut egui::Ui, texture: &TextureHandle) {
 
     // Get the painter and draw the texture
     let painter = ui.ctx().layer_painter(layer_id);
-    let tint = Color32::WHITE;
+    //let tint = Color32::WHITE;
 
     let mut mesh = Mesh::with_texture(texture.into());
 

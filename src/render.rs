@@ -301,9 +301,77 @@ fn setup_visuals(font_data: &egui::FontData, ctx: &egui::Context) {
     fonts::setup_fonts(font_data, ctx);
 }
 
-fn wrapped_body_blocks(ui: &mut egui::Ui, note: &Note, blocks: &Blocks) {
-    let size = 50.0;
+fn push_job_text(job: &mut LayoutJob, s: &str, color: Color32) {
+    job.append(
+        s,
+        0.0,
+        TextFormat {
+            font_id: FontId::new(50.0, FontFamily::Proportional),
+            color,
+            ..Default::default()
+        },
+    )
+}
 
+#[inline]
+pub fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        s.len()
+    } else {
+        let lower_bound = index.saturating_sub(3);
+        let new_index = s.as_bytes()[lower_bound..=index]
+            .iter()
+            .rposition(|b| is_utf8_char_boundary(*b));
+
+        // SAFETY: we know that the character boundary will be within four bytes
+        unsafe { lower_bound + new_index.unwrap_unchecked() }
+    }
+}
+
+#[inline]
+fn is_utf8_char_boundary(c: u8) -> bool {
+    // This is bit magic equivalent to: b < 128 || b >= 192
+    (c as i8) >= -0x40
+}
+
+const ABBREV_SIZE: usize = 10;
+
+fn abbrev_str(name: &str) -> String {
+    if name.len() > ABBREV_SIZE {
+        let closest = floor_char_boundary(name, ABBREV_SIZE);
+        format!("{}...", &name[..closest])
+    } else {
+        name.to_owned()
+    }
+}
+
+fn push_job_user_mention(
+    job: &mut LayoutJob,
+    ndb: &Ndb,
+    block: &Block,
+    txn: &Transaction,
+    pk: &[u8; 32],
+) {
+    let record = ndb.get_profile_by_pubkey(&txn, pk);
+    if let Ok(record) = record {
+        let profile = record.record.profile().unwrap();
+        push_job_text(
+            job,
+            &format!("@{}", &abbrev_str(profile.name().unwrap_or("nostrich"))),
+            PURPLE,
+        );
+    } else {
+        push_job_text(job, &format!("@{}", &abbrev_str(block.as_str())), PURPLE);
+    }
+}
+
+fn wrapped_body_blocks(
+    ui: &mut egui::Ui,
+    ndb: &Ndb,
+    note: &Note,
+    blocks: &Blocks,
+    txn: &Transaction,
+) {
     let mut job = LayoutJob::default();
     job.justify = false;
     job.halign = egui::Align::LEFT;
@@ -314,39 +382,46 @@ fn wrapped_body_blocks(ui: &mut egui::Ui, note: &Note, blocks: &Blocks) {
         ..Default::default()
     };
 
-    let purple = Color32::from_rgb(0xcc, 0x43, 0xc5);
-
     for block in blocks.iter(note) {
         match block.blocktype() {
-            BlockType::Url => job.append(
-                block.as_str(),
-                0.0,
-                TextFormat {
-                    font_id: FontId::new(size, FontFamily::Proportional),
-                    color: purple,
-                    ..Default::default()
-                },
-            ),
+            BlockType::Url => push_job_text(&mut job, block.as_str(), PURPLE),
 
-            BlockType::Hashtag => job.append(
-                &format!("#{}", block.as_str()),
-                0.0,
-                TextFormat {
-                    font_id: FontId::new(size, FontFamily::Proportional),
-                    color: purple,
-                    ..Default::default()
-                },
-            ),
+            BlockType::Hashtag => {
+                push_job_text(&mut job, "#", PURPLE);
+                push_job_text(&mut job, block.as_str(), PURPLE);
+            }
 
-            _ => job.append(
-                block.as_str(),
-                0.0,
-                TextFormat {
-                    font_id: FontId::new(size, FontFamily::Proportional),
-                    color: Color32::WHITE,
-                    ..Default::default()
-                },
-            ),
+            BlockType::MentionBech32 => {
+                let pk = match block.as_mention().unwrap() {
+                    Mention::Event(ev) => push_job_text(
+                        &mut job,
+                        &format!("@{}", &abbrev_str(block.as_str())),
+                        PURPLE,
+                    ),
+                    Mention::Note(ev) => {
+                        push_job_text(
+                            &mut job,
+                            &format!("@{}", &abbrev_str(block.as_str())),
+                            PURPLE,
+                        );
+                    }
+                    Mention::Profile(nprofile) => {
+                        push_job_user_mention(&mut job, ndb, &block, &txn, nprofile.pubkey())
+                    }
+                    Mention::Pubkey(npub) => {
+                        push_job_user_mention(&mut job, ndb, &block, &txn, npub.pubkey())
+                    }
+                    Mention::Secret(sec) => push_job_text(&mut job, "--redacted--", PURPLE),
+                    Mention::Relay(relay) => {
+                        push_job_text(&mut job, &abbrev_str(block.as_str()), PURPLE)
+                    }
+                    Mention::Addr(addr) => {
+                        push_job_text(&mut job, &abbrev_str(block.as_str()), PURPLE)
+                    }
+                };
+            }
+
+            _ => push_job_text(&mut job, block.as_str(), Color32::WHITE),
         };
     }
 
@@ -444,7 +519,7 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
                                 let blocks =
                                     app.ndb.get_blocks_by_key(&txn, note.key().unwrap())?;
 
-                                wrapped_body_blocks(ui, &note, &blocks);
+                                wrapped_body_blocks(ui, &app.ndb, &note, &blocks, &txn);
 
                                 Ok(())
                             })();

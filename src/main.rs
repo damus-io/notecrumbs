@@ -1,6 +1,5 @@
 use std::net::SocketAddr;
 
-use html_escape;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::header;
@@ -21,9 +20,11 @@ use std::time::Duration;
 
 use lru::LruCache;
 
+mod abbrev;
 mod error;
 mod fonts;
 mod gradient;
+mod html;
 mod nip19;
 mod pfp;
 mod render;
@@ -129,11 +130,6 @@ fn is_utf8_char_boundary(c: u8) -> bool {
     (c as i8) >= -0x40
 }
 
-fn abbreviate<'a>(text: &'a str, len: usize) -> &'a str {
-    let closest = floor_char_boundary(text, len);
-    &text[..closest]
-}
-
 fn serve_profile_html(
     app: &Notecrumbs,
     nip: &Nip19,
@@ -142,74 +138,6 @@ fn serve_profile_html(
 ) -> Result<Response<Full<Bytes>>, Error> {
     let mut data = Vec::new();
     write!(data, "TODO: profile pages\n");
-
-    Ok(Response::builder()
-        .header(header::CONTENT_TYPE, "text/html")
-        .status(StatusCode::OK)
-        .body(Full::new(Bytes::from(data)))?)
-}
-
-fn serve_note_html(
-    app: &Notecrumbs,
-    nip19: &Nip19,
-    note: &render::NoteRenderData,
-    r: Request<hyper::body::Incoming>,
-) -> Result<Response<Full<Bytes>>, Error> {
-    let mut data = Vec::new();
-
-    // indices
-    //
-    // 0: name
-    // 1: abbreviated description
-    // 2: hostname
-    // 3: bech32 entity
-    // 4: Full content
-
-    let hostname = "https://damus.io";
-    let abbrev_content = html_escape::encode_text(abbreviate(&note.note.content, 64));
-    let content = html_escape::encode_text(&note.note.content);
-    let profile_name = html_escape::encode_text(&note.profile.name);
-
-    write!(
-        data,
-        r#"
-        <html>
-        <head>
-          <title>{0} on nostr</title>
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <meta charset="UTF-8">
-
-          <meta property="og:description" content="{1}" />
-          <meta property="og:image" content="{2}/{3}.png"/>
-          <meta property="og:image:alt" content="{0}: {1}" />
-          <meta property="og:image:height" content="600" />
-          <meta property="og:image:width" content="1200" />
-          <meta property="og:image:type" content="image/png" />
-          <meta property="og:site_name" content="Damus" />
-          <meta property="og:title" content="{0} on nostr" />
-          <meta property="og:url" content="{2}/{3}"/>
-          <meta name="og:type" content="website"/>
-          <meta name="twitter:image:src" content="{2}/{3}.png" />
-          <meta name="twitter:site" content="@damusapp" />
-          <meta name="twitter:card" content="summary_large_image" />
-          <meta name="twitter:title" content="{0} on nostr" />
-          <meta name="twitter:description" content="{1}" />
-      
-        </head>
-        <body>
-          <h3>Note!</h3>
-          <div class="note">
-              <div class="note-content">{4}</div>
-          </div>
-        </body>
-        </html>
-        "#,
-        profile_name,
-        abbrev_content,
-        hostname,
-        nip19.to_bech32().unwrap(),
-        content
-    )?;
 
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "text/html")
@@ -258,7 +186,7 @@ async fn serve(
             .body(Full::new(Bytes::from(data)))?)
     } else {
         match render_data {
-            RenderData::Note(note_rd) => serve_note_html(app, &nip19, &note_rd, r),
+            RenderData::Note(note_rd) => html::serve_note_html(app, &nip19, &note_rd, r),
             RenderData::Profile(profile_rd) => serve_profile_html(app, &nip19, &profile_rd, r),
         }
     }

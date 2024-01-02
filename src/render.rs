@@ -1,4 +1,4 @@
-use crate::{fonts, Error, Notecrumbs};
+use crate::{abbrev::abbrev_str, fonts, Error, Notecrumbs};
 use egui::epaint::Shadow;
 use egui::{
     pos2,
@@ -313,38 +313,6 @@ fn push_job_text(job: &mut LayoutJob, s: &str, color: Color32) {
     )
 }
 
-#[inline]
-pub fn floor_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        s.len()
-    } else {
-        let lower_bound = index.saturating_sub(3);
-        let new_index = s.as_bytes()[lower_bound..=index]
-            .iter()
-            .rposition(|b| is_utf8_char_boundary(*b));
-
-        // SAFETY: we know that the character boundary will be within four bytes
-        unsafe { lower_bound + new_index.unwrap_unchecked() }
-    }
-}
-
-#[inline]
-fn is_utf8_char_boundary(c: u8) -> bool {
-    // This is bit magic equivalent to: b < 128 || b >= 192
-    (c as i8) >= -0x40
-}
-
-const ABBREV_SIZE: usize = 10;
-
-fn abbrev_str(name: &str) -> String {
-    if name.len() > ABBREV_SIZE {
-        let closest = floor_char_boundary(name, ABBREV_SIZE);
-        format!("{}...", &name[..closest])
-    } else {
-        name.to_owned()
-    }
-}
-
 fn push_job_user_mention(
     job: &mut LayoutJob,
     ndb: &Ndb,
@@ -393,12 +361,12 @@ fn wrapped_body_blocks(
 
             BlockType::MentionBech32 => {
                 let pk = match block.as_mention().unwrap() {
-                    Mention::Event(ev) => push_job_text(
+                    Mention::Event(_ev) => push_job_text(
                         &mut job,
                         &format!("@{}", &abbrev_str(block.as_str())),
                         PURPLE,
                     ),
-                    Mention::Note(ev) => {
+                    Mention::Note(_ev) => {
                         push_job_text(
                             &mut job,
                             &format!("@{}", &abbrev_str(block.as_str())),

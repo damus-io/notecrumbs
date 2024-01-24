@@ -196,7 +196,10 @@ fn get_profile_render_data(
     let about = profile.about().unwrap_or("").to_string();
     let display_name = profile.display_name().as_ref().map(|a| a.to_string());
     let pfp = app.default_pfp.clone();
-    let pfp_url = "https://damus.io/img/no-profile.svg".to_owned();
+    let pfp_url = profile
+        .picture()
+        .unwrap_or("https://damus.io/img/no-profile.svg")
+        .to_string();
 
     Ok(ProfileRenderData {
         name,

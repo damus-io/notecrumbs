@@ -22,6 +22,7 @@ impl ProfileRenderData {
             name: "nostrich".to_string(),
             display_name: None,
             about: "A am a nosy nostrich".to_string(),
+            pfp_url: "https://damus.io/img/no-profile.svg".to_owned(),
             pfp: pfp,
         }
     }
@@ -31,12 +32,14 @@ impl ProfileRenderData {
 pub struct NoteData {
     pub id: Option<[u8; 32]>,
     pub content: String,
+    pub timestamp: u64,
 }
 
 pub struct ProfileRenderData {
     pub name: String,
     pub display_name: Option<String>,
     pub about: String,
+    pub pfp_url: String,
     pub pfp: egui::ImageData,
 }
 
@@ -97,7 +100,12 @@ impl From<EventId> for EventSource {
 impl NoteData {
     fn default() -> Self {
         let content = "".to_string();
-        NoteData { content, id: None }
+        let timestamp = 0;
+        NoteData {
+            content,
+            timestamp,
+            id: None,
+        }
     }
 }
 
@@ -188,11 +196,13 @@ fn get_profile_render_data(
     let about = profile.about().unwrap_or("").to_string();
     let display_name = profile.display_name().as_ref().map(|a| a.to_string());
     let pfp = app.default_pfp.clone();
+    let pfp_url = "https://damus.io/img/no-profile.svg".to_owned();
 
     Ok(ProfileRenderData {
         name,
         pfp,
         about,
+        pfp_url,
         display_name,
     })
 }
@@ -200,13 +210,20 @@ fn get_profile_render_data(
 fn ndb_note_to_data(note: &Note) -> NoteData {
     let content = note.content().to_string();
     let id = Some(*note.id());
-    NoteData { content, id }
+    let timestamp = note.created_at();
+    NoteData {
+        content,
+        timestamp,
+        id,
+    }
 }
 
 fn sdk_note_to_note_data(note: &Event) -> NoteData {
     let content = note.content.clone();
+    let timestamp = note.created_at.as_u64();
     NoteData {
         content,
+        timestamp,
         id: Some(note.id.to_bytes()),
     }
 }

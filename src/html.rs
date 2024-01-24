@@ -86,11 +86,13 @@ pub fn serve_note_html(
     // 1: abbreviated description
     // 2: hostname
     // 3: bech32 entity
-    // 4: Full content
+    // 5: formatted date
+    // 6: pfp url
 
     let hostname = "https://damus.io";
     let abbrev_content = html_escape::encode_text(abbreviate(&note_data.note.content, 64));
     let profile_name = html_escape::encode_text(&note_data.profile.name);
+    let bech32 = nip19.to_bech32().unwrap();
 
     write!(
         data,
@@ -98,7 +100,9 @@ pub fn serve_note_html(
         <html>
         <head>
           <title>{0} on nostr</title>
+          <link rel="stylesheet" href="https://damus.io/css/notecrumbs.css" type="text/css" />
           <meta name="viewport" content="width=device-width, initial-scale=1">
+          <meta name="apple-itunes-app" content="app-id=1628663131, app-argument=damus:nostr:{3}"/>
           <meta charset="UTF-8">
 
           <meta property="og:description" content="{1}" />
@@ -119,13 +123,35 @@ pub fn serve_note_html(
       
         </head>
         <body>
-          <h3>Note!</h3>
-          <div class="note">
-              <div class="note-content">"#,
+          <main>
+            <div class="container">
+                 <div class="top-menu">
+                   <a href="https://damus.io" target="_blank">
+                     <img src="https://damus.io/logo_icon.png" class="logo" />
+                   </a>
+                   <!--
+                   <a href="damus:nostr:note1234..." id="top-menu-open-in-damus-button" class="accent-button">
+                     Open in Damus
+                   </a>
+                   -->
+                </div>
+                <h3 class="page-heading">Note</h3>
+                  <div class="note-container">
+                      <div class="note">
+                        <div class="note-header">
+                           <img src="{5}" class="note-author-avatar" />
+                           <div class="note-author-name">{0}</div>
+                           <div class="note-header-separator">·</div>
+                           <div class="note-timestamp">{4}</div>
+                        </div>
+
+                          <div class="note-content">"#,
         profile_name,
         abbrev_content,
         hostname,
-        nip19.to_bech32().unwrap()
+        bech32,
+        note_data.note.timestamp,
+        note_data.profile.pfp_url,
     )?;
 
     let ok = (|| -> Result<(), nostrdb::Error> {
@@ -150,12 +176,26 @@ pub fn serve_note_html(
 
     write!(
         data,
-        "
+        r#"
+                       </div>
+                   </div>
+                </div>
+               <div class="note-actions-footer">
+                 <a href="nostr:{}" class="muted-link">Open with default Nostr client</a>
                </div>
-            </div>
+            </main>
+            <footer>
+                <span class="footer-note">
+                  <a href="https://damus.io">Damus</a> is a decentralized social network app built on the Nostr protocol.
+                </span>
+                <span class="copyright-note">
+                  © Damus Nostr Inc.
+                </span>
+            </footer>
         </body>
     </html>
-    "
+    "#,
+        bech32
     );
 
     Ok(Response::builder()

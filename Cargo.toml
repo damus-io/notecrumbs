@@ -13,11 +13,12 @@ hyper-util = { version = "0.1.1", features = ["full"] }
 http-body-util = "0.1"
 log = "0.4.20"
 env_logger = "0.10.1"
-nostrdb = { git = "https://github.com/damus-io/nostrdb-rs.git", rev = "9d802004948d56446f11a10ea846c8543824b041" }
+nostrdb = { git = "https://github.com/damus-io/nostrdb-rs", rev = "d7ad4a44b929157795601a68542490b4184ae657" }
 #nostrdb = { path = "/home/jb55/src/rust/nostrdb-rs" }
 #nostrdb = "0.1.6"
 #nostr-sdk = { git = "https://github.com/damus-io/nostr-sdk.git", rev = "fc0dc7b38f5060f171228b976b9700c0135245d3" }
-nostr-sdk = "0.26.0"
+nostr-sdk = "0.37.0"
+nostr = "0.37.0"
 hex = "0.4.3"
 egui = "0.23.0"
 egui_extras = { version = "0.23.0", features = ["image", "svg"] }

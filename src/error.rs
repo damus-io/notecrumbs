@@ -3,6 +3,8 @@ use std::array::TryFromSliceError;
 use std::fmt;
 use tokio::sync::broadcast::error::RecvError;
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 #[derive(Debug)]
 pub enum Error {
     Nip19(nip19::Error),
@@ -13,14 +15,18 @@ pub enum Error {
     Recv(RecvError),
     Io(std::io::Error),
     Generic(String),
+    Timeout(tokio::time::error::Elapsed),
     Image(image::error::ImageError),
     Secp(nostr_sdk::secp256k1::Error),
     InvalidUri,
     NotFound,
     /// Profile picture is too big
+    #[allow(dead_code)]
     TooBig,
     InvalidNip19,
+    #[allow(dead_code)]
     InvalidProfilePic,
+    CantRender,
     SliceErr,
 }
 
@@ -31,7 +37,7 @@ impl From<image::error::ImageError> for Error {
 }
 
 impl From<http::uri::InvalidUri> for Error {
-    fn from(err: http::uri::InvalidUri) -> Self {
+    fn from(_err: http::uri::InvalidUri) -> Self {
         Error::InvalidUri
     }
 }
@@ -57,6 +63,12 @@ impl From<String> for Error {
 impl From<RecvError> for Error {
     fn from(err: RecvError) -> Self {
         Error::Recv(err)
+    }
+}
+
+impl From<tokio::time::error::Elapsed> for Error {
+    fn from(err: tokio::time::error::Elapsed) -> Self {
+        Error::Timeout(err)
     }
 }
 
@@ -110,7 +122,9 @@ impl fmt::Display for Error {
             Error::SliceErr => write!(f, "Array slice error"),
             Error::TooBig => write!(f, "Profile picture is too big"),
             Error::InvalidProfilePic => write!(f, "Profile picture is corrupt"),
+            Error::CantRender => write!(f, "Error rendering"),
             Error::Image(err) => write!(f, "Image error: {}", err),
+            Error::Timeout(elapsed) => write!(f, "Timeout error: {}", elapsed),
             Error::InvalidUri => write!(f, "Invalid url"),
             Error::Hyper(err) => write!(f, "Hyper error: {}", err),
             Error::Generic(err) => write!(f, "Generic error: {}", err),

@@ -4,7 +4,7 @@ use egui::{lerp, Color32, Pos2, Rgba};
 pub struct Gradient(pub Vec<Color32>);
 
 impl Gradient {
-    pub fn linear(left: Color32, right: Color32) -> Self {
+    pub fn _linear(left: Color32, right: Color32) -> Self {
         let left = Rgba::from(left);
         let right = Rgba::from(right);
 
@@ -44,7 +44,7 @@ impl Gradient {
         Self(result)
     }
 
-    pub fn radial_alpha_gradient(
+    pub fn _radial_alpha_gradient(
         center: Pos2,
         radius: f32,
         start_color: Color32,
@@ -86,7 +86,7 @@ impl Gradient {
 
     /// Do premultiplied alpha-aware blending of the gradient on top of the fill color
     /// in gamma-space.
-    pub fn with_bg_fill(self, bg: Color32) -> Self {
+    pub fn _with_bg_fill(self, bg: Color32) -> Self {
         Self(
             self.0
                 .into_iter()

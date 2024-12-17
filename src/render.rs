@@ -1,4 +1,4 @@
-use crate::{abbrev::abbrev_str, fonts, Error, Notecrumbs};
+use crate::{abbrev::abbrev_str, error::Result, fonts, nip19, Error, Notecrumbs};
 use egui::epaint::Shadow;
 use egui::{
     pos2,
@@ -6,311 +6,337 @@ use egui::{
     Color32, FontFamily, FontId, Mesh, Rect, RichText, Rounding, Shape, TextureHandle, Vec2,
     Visuals,
 };
-use log::{debug, info, warn};
+use log::{debug, error, warn};
+use nostr::event::kind::Kind;
+use nostr::types::{SingleLetterTag, Timestamp};
+use nostr_sdk::async_utility::futures_util::StreamExt;
 use nostr_sdk::nips::nip19::Nip19;
-use nostr_sdk::prelude::{json, Event, EventId, Nip19Event, XOnlyPublicKey};
-use nostrdb::{Block, BlockType, Blocks, Mention, Ndb, Note, Transaction};
+use nostr_sdk::prelude::{Client, EventId, Keys, PublicKey};
+use nostrdb::{
+    Block, BlockType, Blocks, Filter, FilterElement, FilterField, Mention, Ndb, Note, NoteKey,
+    ProfileKey, ProfileRecord, Transaction,
+};
+use std::collections::{BTreeMap, BTreeSet};
+use tokio::time::{timeout, Duration};
 
 const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
 
-//use egui::emath::Rot2;
-//use std::f32::consts::PI;
-
-impl ProfileRenderData {
-    pub fn default(pfp: egui::ImageData) -> Self {
-        ProfileRenderData {
-            name: "nostrich".to_string(),
-            display_name: None,
-            about: "A am a nosy nostrich".to_string(),
-            pfp_url: "https://damus.io/img/no-profile.svg".to_owned(),
-            pfp: pfp,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct NoteData {
-    pub id: Option<[u8; 32]>,
-    pub content: String,
-    pub timestamp: u64,
-}
-
-pub struct ProfileRenderData {
-    pub name: String,
-    pub display_name: Option<String>,
-    pub about: String,
-    pub pfp_url: String,
-    pub pfp: egui::ImageData,
-}
-
 pub struct NoteRenderData {
-    pub note: NoteData,
-    pub profile: ProfileRenderData,
+    pub note_key: Option<NoteKey>,
+    pub profile_key: Option<ProfileKey>,
 }
 
-pub struct PartialNoteRenderData {
-    pub note: Option<NoteData>,
-    pub profile: Option<ProfileRenderData>,
+impl NoteRenderData {
+    pub fn new(note_key: Option<NoteKey>, profile_key: Option<ProfileKey>) -> Self {
+        Self {
+            note_key,
+            profile_key,
+        }
+    }
 }
 
-pub enum PartialRenderData {
-    Note(PartialNoteRenderData),
-    Profile(Option<ProfileRenderData>),
-}
-
+/// Primary keys for the data we're interested in rendering
 pub enum RenderData {
+    Profile(Option<ProfileKey>),
     Note(NoteRenderData),
-    Profile(ProfileRenderData),
 }
 
-#[derive(Debug)]
-pub enum EventSource {
-    Nip19(Nip19Event),
-    Id(EventId),
-}
+impl RenderData {
+    pub fn note(note_key: Option<NoteKey>, profile_key: Option<ProfileKey>) -> Self {
+        Self::Note(NoteRenderData::new(note_key, profile_key))
+    }
 
-impl EventSource {
-    fn id(&self) -> EventId {
+    pub fn profile(profile_key: Option<ProfileKey>) -> Self {
+        Self::Profile(profile_key)
+    }
+
+    pub fn is_complete(&self) -> bool {
+        !(self.needs_profile() || self.needs_note())
+    }
+
+    pub fn needs_profile(&self) -> bool {
         match self {
-            EventSource::Nip19(ev) => ev.event_id,
-            EventSource::Id(id) => *id,
+            RenderData::Profile(pkey) => pkey.is_none(),
+            RenderData::Note(note) => note.profile_key.is_none(),
         }
     }
 
-    fn author(&self) -> Option<XOnlyPublicKey> {
+    pub fn needs_note(&self) -> bool {
         match self {
-            EventSource::Nip19(ev) => ev.author,
-            EventSource::Id(_) => None,
+            RenderData::Profile(_pkey) => false,
+            RenderData::Note(note) => note.note_key.is_none(),
         }
     }
 }
 
-impl From<Nip19Event> for EventSource {
-    fn from(event: Nip19Event) -> EventSource {
-        EventSource::Nip19(event)
+fn renderdata_to_filter(render_data: &RenderData, nip19: &Nip19) -> Vec<Filter> {
+    if render_data.is_complete() {
+        return vec![];
     }
-}
 
-impl From<EventId> for EventSource {
-    fn from(event_id: EventId) -> EventSource {
-        EventSource::Id(event_id)
-    }
-}
+    let mut filters = Vec::with_capacity(2);
 
-impl NoteData {
-    fn default() -> Self {
-        let content = "".to_string();
-        let timestamp = 0;
-        NoteData {
-            content,
-            timestamp,
-            id: None,
+    if render_data.needs_note() {
+        if let Some(evid) = nip19::nip19_event_id(nip19) {
+            filters.push(Filter::new().ids([evid]).build());
+        }
+    } else if render_data.needs_profile() {
+        if let Some(pubkey) = nip19::nip19_author(nip19) {
+            filters.push(Filter::new().authors([&pubkey.to_bytes()]).build());
         }
     }
+
+    filters
 }
 
-impl PartialRenderData {
-    pub async fn complete(self, app: &Notecrumbs, nip19: &Nip19) -> RenderData {
-        match self {
-            PartialRenderData::Note(partial) => {
-                RenderData::Note(partial.complete(app, nip19).await)
+fn convert_filter(ndb_filter: nostrdb::Filter) -> nostr::types::Filter {
+    let mut filter = nostr::types::Filter::new();
+
+    for element in &ndb_filter {
+        match element {
+            FilterField::Ids(id_elems) => {
+                let event_ids = id_elems
+                    .into_iter()
+                    .map(|id| EventId::from_slice(id).expect("event id"));
+                filter = filter.ids(event_ids);
             }
 
-            PartialRenderData::Profile(Some(profile)) => RenderData::Profile(profile),
-
-            PartialRenderData::Profile(None) => {
-                warn!("TODO: implement profile data completion");
-                RenderData::Profile(ProfileRenderData::default(app.default_pfp.clone()))
-            }
-        }
-    }
-}
-
-impl PartialNoteRenderData {
-    pub async fn complete(self, app: &Notecrumbs, nip19: &Nip19) -> NoteRenderData {
-        // we have everything, all done!
-        match (self.note, self.profile) {
-            (Some(note), Some(profile)) => {
-                return NoteRenderData { note, profile };
+            FilterField::Authors(authors) => {
+                let authors = authors
+                    .into_iter()
+                    .map(|id| PublicKey::from_slice(id).expect("ok"));
+                filter = filter.authors(authors);
             }
 
-            // Don't hold ourselves up on profile data for notes. We can spin
-            // off a background task to find the profile though.
-            (Some(note), None) => {
-                warn!("TODO: spin off profile query when missing note profile");
-                let profile = ProfileRenderData::default(app.default_pfp.clone());
-                return NoteRenderData { note, profile };
+            FilterField::Kinds(int_elems) => {
+                let kinds = int_elems.into_iter().map(|knd| Kind::from_u16(knd as u16));
+                filter = filter.kinds(kinds);
             }
 
-            _ => (),
-        }
-
-        debug!("Finding {:?}", nip19);
-
-        match crate::find_note(app, &nip19).await {
-            Ok(note_res) => {
-                let note = match note_res.note {
-                    Some(note) => {
-                        debug!("saving {:?} to nostrdb", &note);
-                        let _ = app
-                            .ndb
-                            .process_event(&json!(["EVENT", "s", note]).to_string());
-                        sdk_note_to_note_data(&note)
-                    }
-                    None => NoteData::default(),
+            FilterField::Tags(chr, tag_elems) => {
+                let single_letter = if let Ok(single) = SingleLetterTag::from_char(chr) {
+                    single
+                } else {
+                    warn!("failed to adding char filter element: '{}", chr);
+                    continue;
                 };
 
-                let profile = match note_res.profile {
-                    Some(profile) => {
-                        debug!("saving profile to nostrdb: {:?}", &profile);
-                        let _ = app
-                            .ndb
-                            .process_event(&json!(["EVENT", "s", profile]).to_string());
-                        // TODO: wire profile to profile data, download pfp
-                        ProfileRenderData::default(app.default_pfp.clone())
+                let mut tags: BTreeMap<SingleLetterTag, BTreeSet<String>> = BTreeMap::new();
+                let mut elems: BTreeSet<String> = BTreeSet::new();
+
+                for elem in tag_elems {
+                    if let FilterElement::Str(s) = elem {
+                        elems.insert(s.to_string());
+                    } else {
+                        warn!(
+                            "not adding non-string element from filter tag '{}",
+                            single_letter
+                        );
                     }
-                    None => ProfileRenderData::default(app.default_pfp.clone()),
-                };
+                }
 
-                NoteRenderData { note, profile }
+                tags.insert(single_letter, elems);
+
+                filter.generic_tags = tags;
             }
-            Err(_err) => {
-                let note = NoteData::default();
-                let profile = ProfileRenderData::default(app.default_pfp.clone());
-                NoteRenderData { note, profile }
+
+            FilterField::Since(since) => {
+                filter.since = Some(Timestamp::from_secs(since));
             }
-        }
-    }
-}
 
-fn get_profile_render_data(
-    txn: &Transaction,
-    app: &Notecrumbs,
-    pubkey: &XOnlyPublicKey,
-) -> Result<ProfileRenderData, Error> {
-    let profile = app.ndb.get_profile_by_pubkey(&txn, &pubkey.serialize())?;
-    info!("profile cache hit {:?}", pubkey);
+            FilterField::Until(until) => {
+                filter.until = Some(Timestamp::from_secs(until));
+            }
 
-    let profile = profile.record.profile().ok_or(nostrdb::Error::NotFound)?;
-    let name = profile.name().unwrap_or("").to_string();
-    let about = profile.about().unwrap_or("").to_string();
-    let display_name = profile.display_name().as_ref().map(|a| a.to_string());
-    let pfp = app.default_pfp.clone();
-    let pfp_url = profile
-        .picture()
-        .unwrap_or("https://damus.io/img/no-profile.svg")
-        .to_string();
-
-    Ok(ProfileRenderData {
-        name,
-        pfp,
-        about,
-        pfp_url,
-        display_name,
-    })
-}
-
-fn ndb_note_to_data(note: &Note) -> NoteData {
-    let content = note.content().to_string();
-    let id = Some(*note.id());
-    let timestamp = note.created_at();
-    NoteData {
-        content,
-        timestamp,
-        id,
-    }
-}
-
-fn sdk_note_to_note_data(note: &Event) -> NoteData {
-    let content = note.content.clone();
-    let timestamp = note.created_at.as_u64();
-    NoteData {
-        content,
-        timestamp,
-        id: Some(note.id.to_bytes()),
-    }
-}
-
-fn get_note_render_data(
-    app: &Notecrumbs,
-    source: &EventSource,
-) -> Result<PartialNoteRenderData, Error> {
-    debug!("got here a");
-    let txn = Transaction::new(&app.ndb)?;
-    let m_note = app
-        .ndb
-        .get_note_by_id(&txn, source.id().as_bytes().try_into()?)
-        .map_err(Error::Nostrdb);
-
-    debug!("note cached? {:?}", m_note);
-
-    // It's possible we have an author pk in an nevent, let's use it if we do.
-    // This gives us the opportunity to load the profile picture earlier if we
-    // have a cached profile
-    let mut profile: Option<ProfileRenderData> = None;
-
-    let m_note_pk = m_note
-        .as_ref()
-        .ok()
-        .and_then(|n| XOnlyPublicKey::from_slice(n.pubkey()).ok());
-
-    let m_pk = m_note_pk.or(source.author());
-
-    // get profile render data if we can
-    if let Some(pk) = m_pk {
-        match get_profile_render_data(&txn, app, &pk) {
-            Err(err) => warn!(
-                "No profile found for {} for note {}: {}",
-                &pk,
-                &source.id(),
-                err
-            ),
-            Ok(record) => {
-                debug!("profile record found for note");
-                profile = Some(record);
+            FilterField::Limit(limit) => {
+                filter.limit = Some(limit as usize);
             }
         }
     }
 
-    let note = m_note.map(|n| ndb_note_to_data(&n)).ok();
-    Ok(PartialNoteRenderData { profile, note })
+    filter
 }
 
-pub fn get_render_data(app: &Notecrumbs, target: &Nip19) -> Result<PartialRenderData, Error> {
-    match target {
-        Nip19::Profile(profile) => {
-            let txn = Transaction::new(&app.ndb)?;
-            Ok(PartialRenderData::Profile(
-                get_profile_render_data(&txn, app, &profile.public_key).ok(),
-            ))
+pub async fn find_note(ndb: Ndb, keys: Keys, filters: Vec<nostrdb::Filter>, nip19: &Nip19) -> Result<()> {
+    use nostr_sdk::JsonUtil;
+
+    let client = Client::builder().signer(keys).build();
+
+    let _ = client.add_relay("wss://relay.damus.io").await;
+    let _ = client.add_relay("wss://nostr.wine").await;
+    let _ = client.add_relay("wss://nos.lol").await;
+
+    let other_relays = nip19::nip19_relays(nip19);
+    for relay in other_relays {
+        let _ = client.add_relay(relay).await;
+    }
+
+    client
+        .connect_with_timeout(std::time::Duration::from_millis(800))
+        .await;
+
+    debug!("finding note(s) with filters: {:?}", filters);
+
+    let mut streamed_events = client
+        .stream_events(filters, Some(std::time::Duration::from_millis(800)))
+        .await?;
+
+    while let Some(event) = streamed_events.next().await {
+        debug!("processing event {:?}", event);
+        if let Err(err) = ndb.process_event(&event.as_json()) {
+            error!("error processing event: {err}");
+        }
+    }
+
+    Ok(())
+}
+
+impl RenderData {
+    fn set_profile_key(&mut self, key: ProfileKey) {
+        match self {
+            RenderData::Profile(pk) => {
+                *pk = Some(key);
+            }
+            RenderData::Note(note_rd) => {
+                note_rd.profile_key = Some(key);
+            }
+        };
+    }
+
+    fn set_note_key(&mut self, key: NoteKey) {
+        match self {
+            RenderData::Profile(_pk) => {}
+            RenderData::Note(note_rd) => {
+                note_rd.note_key = Some(key);
+            }
+        };
+    }
+
+    pub async fn complete(&mut self, mut ndb: Ndb, keys: Keys, nip19: Nip19) -> Result<()> {
+        let sub_id = {
+            let filter = renderdata_to_filter(self, &nip19);
+            if filter.is_empty() {
+                // should really never happen unless someone broke
+                // needs_note and needs_profile
+                return Err(Error::InvalidNip19);
+            }
+            ndb.subscribe(&filter)?
+        };
+
+        let wait_for = Duration::from_secs(1);
+        let mut stream = sub_id.stream(&ndb).notes_per_await(2);
+
+        {
+            let ndb = ndb.clone();
+            tokio::spawn(async move { find_note(ndb, keys, &nip19).await });
         }
 
-        Nip19::Pubkey(pk) => {
-            let txn = Transaction::new(&app.ndb)?;
-            Ok(PartialRenderData::Profile(
-                get_profile_render_data(&txn, app, pk).ok(),
-            ))
+        let mut loops = 0;
+        loop {
+            if loops == 2 {
+                break;
+            }
+
+            let note_keys = if let Some(note_keys) = timeout(wait_for, stream.next()).await? {
+                note_keys
+            } else {
+                // end of stream?
+                break;
+            };
+
+            let note_keys_len = note_keys.len();
+
+            {
+                let txn = Transaction::new(&ndb)?;
+
+                for note_key in note_keys {
+                    let note = if let Ok(note) = ndb.get_note_by_key(&txn, note_key) {
+                        note
+                    } else {
+                        error!("race condition in RenderData::complete?");
+                        continue;
+                    };
+
+                    if note.kind() == 0 {
+                        if let Ok(profile_key) = ndb.get_profilekey_by_pubkey(&txn, note.pubkey()) {
+                            self.set_profile_key(profile_key);
+                        }
+                    } else {
+                        self.set_note_key(note_key);
+                    }
+                }
+            }
+
+            if note_keys_len >= 2 {
+                break;
+            }
+
+            loops += 1;
         }
 
-        Nip19::Event(event) => Ok(PartialRenderData::Note(get_note_render_data(
-            app,
-            &EventSource::Nip19(event.clone()),
-        )?)),
-
-        Nip19::EventId(evid) => Ok(PartialRenderData::Note(get_note_render_data(
-            app,
-            &EventSource::Id(*evid),
-        )?)),
-
-        Nip19::Secret(_nsec) => Err(Error::InvalidNip19),
-        Nip19::Coordinate(_coord) => Err(Error::InvalidNip19),
+        if let Err(err) = ndb.unsubscribe(sub_id) {
+            error!("error unsubscribing: {err}");
+        }
+        Ok(())
     }
 }
 
-fn render_username(ui: &mut egui::Ui, profile: &ProfileRenderData) {
-    #[cfg(feature = "profiling")]
-    puffin::profile_function!();
-    let name = format!("@{}", profile.name);
+/// Attempt to locate the render data locally. Anything missing from
+/// render data will be fetched.
+pub fn get_render_data(ndb: &Ndb, txn: &Transaction, nip19: &Nip19) -> Result<RenderData> {
+    match nip19 {
+        Nip19::Event(nevent) => {
+            let m_note = ndb.get_note_by_id(txn, nevent.event_id.as_bytes()).ok();
+
+            let profile_key = if let Some(pk) = m_note.as_ref().map(|note| note.pubkey()) {
+                ndb.get_profilekey_by_pubkey(txn, pk).ok()
+            } else if let Some(pubkey) = nevent.author {
+                ndb.get_profilekey_by_pubkey(txn, &pubkey.serialize()).ok()
+            } else {
+                None
+            };
+
+            let note_key = m_note.and_then(|n| n.key());
+
+            Ok(RenderData::note(note_key, profile_key))
+        }
+
+        Nip19::EventId(evid) => {
+            let m_note = ndb.get_note_by_id(txn, evid.as_bytes()).ok();
+
+            let note_key = m_note.as_ref().and_then(|n| n.key());
+            let profile_key = m_note
+                .as_ref()
+                .and_then(|note| ndb.get_profilekey_by_pubkey(txn, note.pubkey()).ok());
+
+            Ok(RenderData::note(note_key, profile_key))
+        }
+
+        Nip19::Profile(nprofile) => {
+            let pubkey = nprofile.public_key.serialize();
+            let key = ndb.get_profilekey_by_pubkey(txn, &pubkey).ok();
+
+            Ok(RenderData::profile(key))
+        }
+
+        Nip19::Pubkey(public_key) => {
+            let pubkey = public_key.serialize();
+            let key = ndb.get_profilekey_by_pubkey(txn, &pubkey).ok();
+
+            Ok(RenderData::profile(key))
+        }
+
+        _ => Err(Error::CantRender),
+    }
+}
+
+fn render_username(ui: &mut egui::Ui, profile: Option<&ProfileRecord>) {
+    let name = format!(
+        "@{}",
+        profile
+            .and_then(|pr| pr.record().profile().and_then(|p| p.name()))
+            .unwrap_or("nostrich")
+    );
     ui.label(RichText::new(&name).size(40.0).color(Color32::LIGHT_GRAY));
 }
 
@@ -340,9 +366,9 @@ fn push_job_user_mention(
     txn: &Transaction,
     pk: &[u8; 32],
 ) {
-    let record = ndb.get_profile_by_pubkey(&txn, pk);
+    let record = ndb.get_profile_by_pubkey(txn, pk);
     if let Ok(record) = record {
-        let profile = record.record.profile().unwrap();
+        let profile = record.record().profile().unwrap();
         push_job_text(
             job,
             &format!("@{}", &abbrev_str(profile.name().unwrap_or("nostrich"))),
@@ -360,13 +386,15 @@ fn wrapped_body_blocks(
     blocks: &Blocks,
     txn: &Transaction,
 ) {
-    let mut job = LayoutJob::default();
-    job.justify = false;
-    job.halign = egui::Align::LEFT;
-    job.wrap = egui::text::TextWrapping {
-        max_rows: 5,
-        break_anywhere: false,
-        overflow_character: Some('…'),
+    let mut job = LayoutJob {
+        justify: false,
+        halign: egui::Align::LEFT,
+        wrap: egui::text::TextWrapping {
+            max_rows: 5,
+            break_anywhere: false,
+            overflow_character: Some('…'),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -380,7 +408,7 @@ fn wrapped_body_blocks(
             }
 
             BlockType::MentionBech32 => {
-                let pk = match block.as_mention().unwrap() {
+                match block.as_mention().unwrap() {
                     Mention::Event(_ev) => push_job_text(
                         &mut job,
                         &format!("@{}", &abbrev_str(block.as_str())),
@@ -394,16 +422,16 @@ fn wrapped_body_blocks(
                         );
                     }
                     Mention::Profile(nprofile) => {
-                        push_job_user_mention(&mut job, ndb, &block, &txn, nprofile.pubkey())
+                        push_job_user_mention(&mut job, ndb, &block, txn, nprofile.pubkey())
                     }
                     Mention::Pubkey(npub) => {
-                        push_job_user_mention(&mut job, ndb, &block, &txn, npub.pubkey())
+                        push_job_user_mention(&mut job, ndb, &block, txn, npub.pubkey())
                     }
-                    Mention::Secret(sec) => push_job_text(&mut job, "--redacted--", PURPLE),
-                    Mention::Relay(relay) => {
+                    Mention::Secret(_sec) => push_job_text(&mut job, "--redacted--", PURPLE),
+                    Mention::Relay(_relay) => {
                         push_job_text(&mut job, &abbrev_str(block.as_str()), PURPLE)
                     }
-                    Mention::Addr(addr) => {
+                    Mention::Addr(_addr) => {
                         push_job_text(&mut job, &abbrev_str(block.as_str()), PURPLE)
                     }
                 };
@@ -455,9 +483,10 @@ fn note_frame_align() -> egui::Layout {
     }
 }
 
-fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
+fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note_rd: &NoteRenderData) -> Result<()> {
     setup_visuals(&app.font_data, ctx);
 
+    let note_key = note_rd.note_key;
     let outer_margin = 60.0;
     let inner_margin = 40.0;
     let canvas_width = 1200.0;
@@ -465,7 +494,15 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
     //let canvas_size = Vec2::new(canvas_width, canvas_height);
 
     let total_margin = outer_margin + inner_margin;
-    let pfp = ctx.load_texture("pfp", note.profile.pfp.clone(), Default::default());
+    let txn = Transaction::new(&app.ndb)?;
+    let profile_record = note_rd
+        .profile_key
+        .and_then(|pk| app.ndb.get_profile_by_key(&txn, pk).ok());
+    //let _profile = profile_record.and_then(|pr| pr.record().profile());
+    //let pfp_url = profile.and_then(|p| p.picture());
+
+    // TODO: async pfp loading using notedeck browser context?
+    let pfp = ctx.load_texture("pfp", app.default_pfp.clone(), Default::default());
     let bg = ctx.load_texture("background", app.background.clone(), Default::default());
 
     egui::CentralPanel::default()
@@ -474,7 +511,7 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
                 //.fill(Color32::from_rgb(0x43, 0x20, 0x62)
                 .fill(Color32::from_rgb(0x00, 0x00, 0x00)),
         )
-        .show(&ctx, |ui| {
+        .show(ctx, |ui| {
             background_texture(ui, &bg);
             egui::Frame::none()
                 .fill(Color32::from_rgb(0x0F, 0x0F, 0x0F))
@@ -500,31 +537,29 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, note: &NoteRenderData) {
                             ui.set_max_size(desired);
                             ui.set_min_size(desired);
 
-                            let ok = (|| -> Result<(), nostrdb::Error> {
-                                let txn = Transaction::new(&app.ndb)?;
-                                let note_id = note.note.id.ok_or(nostrdb::Error::NotFound)?;
-                                let note = app.ndb.get_note_by_id(&txn, &note_id)?;
-                                let blocks =
-                                    app.ndb.get_blocks_by_key(&txn, note.key().unwrap())?;
-
-                                wrapped_body_blocks(ui, &app.ndb, &note, &blocks, &txn);
-
-                                Ok(())
-                            })();
-
-                            if let Err(_) = ok {
-                                wrapped_body_text(ui, &note.note.content);
+                            if let Some(note) =
+                                note_key.and_then(|nk| app.ndb.get_note_by_key(&txn, nk).ok())
+                            {
+                                if let Some(blocks) =
+                                    note_key.and_then(|nk| app.ndb.get_blocks_by_key(&txn, nk).ok())
+                                {
+                                    wrapped_body_blocks(ui, &app.ndb, &note, &blocks, &txn);
+                                } else {
+                                    wrapped_body_text(ui, note.content());
+                                }
                             }
                         });
 
                         ui.horizontal(|ui| {
                             ui.image(&pfp);
-                            render_username(ui, &note.profile);
+                            render_username(ui, profile_record.as_ref());
                             ui.with_layout(right_aligned(), discuss_on_damus);
                         });
                     });
                 });
         });
+
+    Ok(())
 }
 
 fn background_texture(ui: &mut egui::Ui, texture: &TextureHandle) {
@@ -572,22 +607,26 @@ fn discuss_on_damus(ui: &mut egui::Ui) {
     ui.add(button);
 }
 
-fn profile_ui(app: &Notecrumbs, ctx: &egui::Context, profile: &ProfileRenderData) {
-    let pfp = ctx.load_texture("pfp", profile.pfp.clone(), Default::default());
+fn profile_ui(app: &Notecrumbs, ctx: &egui::Context, profile_key: Option<ProfileKey>) {
+    let pfp = ctx.load_texture("pfp", app.default_pfp.clone(), Default::default());
     setup_visuals(&app.font_data, ctx);
 
-    egui::CentralPanel::default().show(&ctx, |ui| {
+    egui::CentralPanel::default().show(ctx, |ui| {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.image(&pfp);
-                render_username(ui, &profile);
+                if let Ok(txn) = Transaction::new(&app.ndb) {
+                    let profile =
+                        profile_key.and_then(|pk| app.ndb.get_profile_by_key(&txn, pk).ok());
+                    render_username(ui, profile.as_ref());
+                }
             });
             //body(ui, &profile.about);
         });
     });
 }
 
-pub fn render_note(app: &Notecrumbs, render_data: &RenderData) -> Vec<u8> {
+pub fn render_note(ndb: &Notecrumbs, render_data: &RenderData) -> Vec<u8> {
     use egui_skia::{rasterize, RasterizeOptions};
     use skia_safe::EncodedImageFormat;
 
@@ -599,13 +638,15 @@ pub fn render_note(app: &Notecrumbs, render_data: &RenderData) -> Vec<u8> {
     let mut surface = match render_data {
         RenderData::Note(note_render_data) => rasterize(
             (1200, 600),
-            |ctx| note_ui(app, ctx, note_render_data),
+            |ctx| {
+                let _ = note_ui(ndb, ctx, note_render_data);
+            },
             Some(options),
         ),
 
         RenderData::Profile(profile_render_data) => rasterize(
             (1200, 600),
-            |ctx| profile_ui(app, ctx, profile_render_data),
+            |ctx| profile_ui(ndb, ctx, *profile_render_data),
             Some(options),
         ),
     };

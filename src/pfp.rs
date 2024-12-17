@@ -8,9 +8,6 @@ pub const PFP_SIZE: u32 = 64;
 
 // Thank to gossip for this one!
 pub fn round_image(image: &mut ColorImage) {
-    #[cfg(feature = "profiling")]
-    puffin::profile_function!();
-
     // The radius to the edge of of the avatar circle
     let edge_radius = image.size[0] as f32 / 2.0;
     let edge_radius_squared = edge_radius * edge_radius;
@@ -55,9 +52,6 @@ pub fn round_image(image: &mut ColorImage) {
 }
 
 pub fn process_pfp_bitmap(image: &mut image::DynamicImage) -> ColorImage {
-    #[cfg(features = "profiling")]
-    puffin::profile_function!();
-
     let size = PFP_SIZE;
 
     // Crop square
@@ -83,7 +77,7 @@ pub fn process_pfp_bitmap(image: &mut image::DynamicImage) -> ColorImage {
     color_image
 }
 
-async fn fetch_url(url: &str) -> Result<(Vec<u8>, hyper::Response<Incoming>), Error> {
+async fn _fetch_url(url: &str) -> Result<(Vec<u8>, hyper::Response<Incoming>), Error> {
     use http_body_util::BodyExt;
     use http_body_util::Empty;
     use hyper::Request;
@@ -131,19 +125,16 @@ async fn fetch_url(url: &str) -> Result<(Vec<u8>, hyper::Response<Incoming>), Er
     Ok((data, res))
 }
 
-pub async fn fetch_pfp(url: &str) -> Result<ColorImage, Error> {
-    let (data, res) = fetch_url(url).await?;
-    parse_img_response(data, res)
+pub async fn _fetch_pfp(url: &str) -> Result<ColorImage, Error> {
+    let (data, res) = _fetch_url(url).await?;
+    _parse_img_response(data, res)
 }
 
-fn parse_img_response(
+fn _parse_img_response(
     data: Vec<u8>,
     response: hyper::Response<Incoming>,
 ) -> Result<ColorImage, Error> {
     use egui_extras::image::FitTo;
-
-    #[cfg(feature = "profiling")]
-    puffin::profile_function!();
 
     let content_type = response.headers()["content-type"]
         .to_str()
@@ -152,18 +143,11 @@ fn parse_img_response(
     let size = PFP_SIZE;
 
     if content_type.starts_with("image/svg") {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!("load_svg");
-
-        let mut color_image = egui_extras::image::load_svg_bytes_with_size(
-            &data,
-            FitTo::Size(size as u32, size as u32),
-        )?;
+        let mut color_image =
+            egui_extras::image::load_svg_bytes_with_size(&data, FitTo::Size(size, size))?;
         round_image(&mut color_image);
         Ok(color_image)
     } else if content_type.starts_with("image/") {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!("load_from_memory");
         let mut dyn_image = image::load_from_memory(&data)?;
         Ok(process_pfp_bitmap(&mut dyn_image))
     } else {

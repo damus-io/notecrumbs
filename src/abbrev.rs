@@ -30,7 +30,7 @@ pub fn abbrev_str(name: &str) -> String {
     }
 }
 
-pub fn abbreviate<'a>(text: &'a str, len: usize) -> &'a str {
+pub fn abbreviate(text: &str, len: usize) -> &str {
     let closest = floor_char_boundary(text, len);
     &text[..closest]
 }

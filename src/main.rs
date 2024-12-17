@@ -7,15 +7,17 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use log::{debug, info};
+use log::{error, info};
 use std::io::Write;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
-use crate::error::Error;
-use crate::render::RenderData;
+use crate::{
+    error::Error,
+    render::{ProfileRenderData, RenderData},
+};
 use nostr_sdk::prelude::*;
-use nostrdb::{Config, Ndb};
+use nostrdb::{Config, Ndb, Transaction};
 use std::time::Duration;
 
 use lru::LruCache;
@@ -29,84 +31,21 @@ mod nip19;
 mod pfp;
 mod render;
 
+use crate::secp256k1::XOnlyPublicKey;
+
 type ImageCache = LruCache<XOnlyPublicKey, egui::TextureHandle>;
 
 #[derive(Clone)]
 pub struct Notecrumbs {
-    ndb: Ndb,
+    pub ndb: Ndb,
     keys: Keys,
     font_data: egui::FontData,
-    img_cache: Arc<ImageCache>,
+    _img_cache: Arc<ImageCache>,
     default_pfp: egui::ImageData,
     background: egui::ImageData,
 
     /// How long do we wait for remote note requests
-    timeout: Duration,
-}
-
-pub struct FindNoteResult {
-    note: Option<Event>,
-    profile: Option<Event>,
-}
-
-pub async fn find_note(app: &Notecrumbs, nip19: &Nip19) -> Result<FindNoteResult, Error> {
-    let opts = Options::new().shutdown_on_drop(true);
-    let client = Client::with_opts(&app.keys, opts);
-
-    let mut num_relays: i32 = 2;
-    let _ = client.add_relay("wss://relay.damus.io");
-    let _ = client.add_relay("wss://relay.nostr.band").await;
-
-    let other_relays = nip19::to_relays(nip19);
-    for relay in other_relays {
-        let _ = client.add_relay(relay).await;
-        num_relays += 1;
-    }
-
-    client.connect().await;
-
-    let filters = nip19::to_filters(nip19)?;
-
-    client
-        .req_events_of(filters.clone(), Some(app.timeout))
-        .await;
-
-    let mut note: Option<Event> = None;
-    let mut profile: Option<Event> = None;
-    let mut ends: i32 = 0;
-
-    loop {
-        match client.notifications().recv().await? {
-            RelayPoolNotification::Event { event, .. } => {
-                debug!("got event 1 {:?}", event);
-                note = Some(event);
-                return Ok(FindNoteResult { note, profile });
-            }
-            RelayPoolNotification::RelayStatus { .. } => continue,
-            RelayPoolNotification::Message { message, .. } => match message {
-                RelayMessage::Event { event, .. } => {
-                    if event.kind == Kind::Metadata {
-                        debug!("got profile {:?}", event);
-                        profile = Some(*event);
-                    } else {
-                        debug!("got event {:?}", event);
-                        note = Some(*event);
-                    }
-                }
-                RelayMessage::EndOfStoredEvents(_) => {
-                    ends += 1;
-                    let has_any = note.is_some() || profile.is_some();
-                    if has_any || ends >= num_relays {
-                        return Ok(FindNoteResult { note, profile });
-                    }
-                }
-                _ => continue,
-            },
-            RelayPoolNotification::Stop | RelayPoolNotification::Shutdown => {
-                return Err(Error::NotFound);
-            }
-        }
-    }
+    _timeout: Duration,
 }
 
 #[inline]
@@ -132,12 +71,45 @@ fn is_utf8_char_boundary(c: u8) -> bool {
 
 fn serve_profile_html(
     app: &Notecrumbs,
-    nip: &Nip19,
-    profile: &render::ProfileRenderData,
-    r: Request<hyper::body::Incoming>,
+    _nip: &Nip19,
+    profile_rd: Option<&ProfileRenderData>,
+    _r: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, Error> {
     let mut data = Vec::new();
-    write!(data, "TODO: profile pages\n");
+
+    let profile_key = match profile_rd {
+        None | Some(ProfileRenderData::Missing(_)) => {
+            let _ = write!(data, "Profile not found :(");
+            return Ok(Response::builder()
+                .header(header::CONTENT_TYPE, "text/html")
+                .status(StatusCode::NOT_FOUND)
+                .body(Full::new(Bytes::from(data)))?);
+        }
+
+        Some(ProfileRenderData::Profile(profile_key)) => *profile_key,
+    };
+
+    let txn = Transaction::new(&app.ndb)?;
+
+    let profile_rec = if let Ok(profile_rec) = app.ndb.get_profile_by_key(&txn, profile_key) {
+        profile_rec
+    } else {
+        let _ = write!(data, "Profile not found :(");
+        return Ok(Response::builder()
+            .header(header::CONTENT_TYPE, "text/html")
+            .status(StatusCode::NOT_FOUND)
+            .body(Full::new(Bytes::from(data)))?);
+    };
+
+    let _ = write!(
+        data,
+        "{}",
+        profile_rec
+            .record()
+            .profile()
+            .and_then(|p| p.name())
+            .unwrap_or("nostrich")
+    );
 
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "text/html")
@@ -163,22 +135,32 @@ async fn serve(
     };
 
     // render_data is always returned, it just might be empty
-    let partial_render_data = match render::get_render_data(&app, &nip19) {
-        Err(_err) => {
-            return Ok(Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Full::new(Bytes::from(
-                    "nsecs are not supported, what were you thinking!?\n",
-                )))?);
+    let mut render_data = {
+        let txn = Transaction::new(&app.ndb)?;
+        match render::get_render_data(&app.ndb, &txn, &nip19) {
+            Err(_err) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Full::new(Bytes::from(
+                        "nsecs are not supported, what were you thinking!?\n",
+                    )))?);
+            }
+            Ok(render_data) => render_data,
         }
-        Ok(render_data) => render_data,
     };
 
     // fetch extra data if we are missing it
-    let render_data = partial_render_data.complete(&app, &nip19).await;
+    if !render_data.is_complete() {
+        if let Err(err) = render_data
+            .complete(app.ndb.clone(), app.keys.clone(), nip19.clone())
+            .await
+        {
+            error!("Error fetching completion data: {err}");
+        }
+    }
 
     if is_png {
-        let data = render::render_note(&app, &render_data);
+        let data = render::render_note(app, &render_data);
 
         Ok(Response::builder()
             .header(header::CONTENT_TYPE, "image/png")
@@ -187,7 +169,9 @@ async fn serve(
     } else {
         match render_data {
             RenderData::Note(note_rd) => html::serve_note_html(app, &nip19, &note_rd, r),
-            RenderData::Profile(profile_rd) => serve_profile_html(app, &nip19, &profile_rd, r),
+            RenderData::Profile(profile_rd) => {
+                serve_profile_html(app, &nip19, profile_rd.as_ref(), r)
+            }
         }
     }
 }
@@ -232,7 +216,7 @@ fn get_gradient() -> egui::ColorImage {
 
 fn get_default_pfp() -> egui::ColorImage {
     let img = std::fs::read("assets/default_pfp.jpg").expect("default pfp missing");
-    let mut dyn_image = image::load_from_memory(&img).expect("failed to load default pfp");
+    let mut dyn_image = ::image::load_from_memory(&img).expect("failed to load default pfp");
     pfp::process_pfp_bitmap(&mut dyn_image)
 }
 
@@ -247,7 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Listening on 0.0.0.0:3000");
 
     // Since ndk-sdk will verify for us, we don't need to do it on the db side
-    let mut cfg = Config::new();
+    let cfg = Config::new();
     cfg.skip_validation(true);
     let ndb = Ndb::new(".", &cfg).expect("ndb failed to open");
     let keys = Keys::generate();
@@ -260,8 +244,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app = Notecrumbs {
         ndb,
         keys,
-        timeout,
-        img_cache,
+        _timeout: timeout,
+        _img_cache: img_cache,
         background,
         font_data,
         default_pfp,

@@ -1,56 +1,51 @@
 use crate::Error;
 use crate::{
     abbrev::{abbrev_str, abbreviate},
-    render, Notecrumbs,
+    render::{NoteAndProfileRenderData, NoteRenderData, ProfileRenderData},
+    Notecrumbs,
 };
-use html_escape;
 use http_body_util::Full;
-use hyper::{
-    body::Bytes, header, server::conn::http1, service::service_fn, Request, Response, StatusCode,
-};
-use hyper_util::rt::TokioIo;
-use log::error;
+use hyper::{body::Bytes, header, Request, Response, StatusCode};
+use log::{error, warn};
 use nostr_sdk::prelude::{Nip19, ToBech32};
-use nostrdb::{BlockType, Blocks, Mention, Ndb, Note, Transaction};
+use nostrdb::{BlockType, Blocks, Mention, Note, Transaction};
 use std::io::Write;
 
-pub fn render_note_content(body: &mut Vec<u8>, ndb: &Ndb, note: &Note, blocks: &Blocks) {
+pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
     for block in blocks.iter(note) {
-        let blocktype = block.blocktype();
-
         match block.blocktype() {
             BlockType::Url => {
                 let url = html_escape::encode_text(block.as_str());
-                write!(body, r#"<a href="{}">{}</a>"#, url, url);
+                let _ = write!(body, r#"<a href="{}">{}</a>"#, url, url);
             }
 
             BlockType::Hashtag => {
                 let hashtag = html_escape::encode_text(block.as_str());
-                write!(body, r#"<span class="hashtag">#{}</span>"#, hashtag);
+                let _ = write!(body, r#"<span class="hashtag">#{}</span>"#, hashtag);
             }
 
             BlockType::Text => {
                 let text = html_escape::encode_text(block.as_str());
-                write!(body, r"{}", text);
+                let _ = write!(body, r"{}", text);
             }
 
             BlockType::Invoice => {
-                write!(body, r"{}", block.as_str());
+                let _ = write!(body, r"{}", block.as_str());
             }
 
             BlockType::MentionIndex => {
-                write!(body, r"@nostrich");
+                let _ = write!(body, r"@nostrich");
             }
 
             BlockType::MentionBech32 => {
-                let pk = match block.as_mention().unwrap() {
+                match block.as_mention().unwrap() {
                     Mention::Event(_)
                     | Mention::Note(_)
                     | Mention::Profile(_)
                     | Mention::Pubkey(_)
                     | Mention::Secret(_)
                     | Mention::Addr(_) => {
-                        write!(
+                        let _ = write!(
                             body,
                             r#"<a href="/{}">@{}</a>"#,
                             block.as_str(),
@@ -59,7 +54,7 @@ pub fn render_note_content(body: &mut Vec<u8>, ndb: &Ndb, note: &Note, blocks: &
                     }
 
                     Mention::Relay(relay) => {
-                        write!(
+                        let _ = write!(
                             body,
                             r#"<a href="/{}">{}</a>"#,
                             block.as_str(),
@@ -75,8 +70,8 @@ pub fn render_note_content(body: &mut Vec<u8>, ndb: &Ndb, note: &Note, blocks: &
 pub fn serve_note_html(
     app: &Notecrumbs,
     nip19: &Nip19,
-    note_data: &render::NoteRenderData,
-    r: Request<hyper::body::Incoming>,
+    note_rd: &NoteAndProfileRenderData,
+    _r: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, Error> {
     let mut data = Vec::new();
 
@@ -89,9 +84,39 @@ pub fn serve_note_html(
     // 5: formatted date
     // 6: pfp url
 
+    let txn = Transaction::new(&app.ndb)?;
+    let note_key = match note_rd.note_rd {
+        NoteRenderData::Note(note_key) => note_key,
+        NoteRenderData::Missing(note_id) => {
+            warn!("missing note_id {}", hex::encode(note_id));
+            return Err(Error::NotFound);
+        }
+    };
+
+    let note = if let Ok(note) = app.ndb.get_note_by_key(&txn, note_key) {
+        note
+    } else {
+        // 404
+        return Err(Error::NotFound);
+    };
+
+    let profile = note_rd.profile_rd.as_ref().and_then(|profile_rd| {
+        match profile_rd {
+            // we probably wouldn't have it here, but we query just in case?
+            ProfileRenderData::Missing(pk) => app.ndb.get_profile_by_pubkey(&txn, pk).ok(),
+            ProfileRenderData::Profile(key) => app.ndb.get_profile_by_key(&txn, *key).ok(),
+        }
+    });
+
     let hostname = "https://damus.io";
-    let abbrev_content = html_escape::encode_text(abbreviate(&note_data.note.content, 64));
-    let profile_name = html_escape::encode_text(&note_data.profile.name);
+    let abbrev_content = html_escape::encode_text(abbreviate(note.content(), 64));
+    let profile = profile.and_then(|pr| pr.record().profile());
+    let default_pfp_url = "https://damus.io/img/no-profile.svg";
+    let pfp_url = profile.and_then(|p| p.picture()).unwrap_or(default_pfp_url);
+    let profile_name = {
+        let name = profile.and_then(|p| p.name()).unwrap_or("nostrich");
+        html_escape::encode_text(name)
+    };
     let bech32 = nip19.to_bech32().unwrap();
 
     write!(
@@ -150,31 +175,26 @@ pub fn serve_note_html(
         abbrev_content,
         hostname,
         bech32,
-        note_data.note.timestamp,
-        note_data.profile.pfp_url,
+        note.created_at(),
+        pfp_url,
     )?;
 
     let ok = (|| -> Result<(), nostrdb::Error> {
-        let txn = Transaction::new(&app.ndb)?;
-        let note_id = note_data.note.id.ok_or(nostrdb::Error::NotFound)?;
-        let note = app.ndb.get_note_by_id(&txn, &note_id)?;
+        let note_id = note.id();
+        let note = app.ndb.get_note_by_id(&txn, note_id)?;
         let blocks = app.ndb.get_blocks_by_key(&txn, note.key().unwrap())?;
 
-        render_note_content(&mut data, &app.ndb, &note, &blocks);
+        render_note_content(&mut data, &note, &blocks);
 
         Ok(())
     })();
 
     if let Err(err) = ok {
         error!("error rendering html: {}", err);
-        write!(
-            data,
-            "{}",
-            html_escape::encode_text(&note_data.note.content)
-        );
+        let _ = write!(data, "{}", html_escape::encode_text(&note.content()));
     }
 
-    write!(
+    let _ = write!(
         data,
         r#"
                        </div>

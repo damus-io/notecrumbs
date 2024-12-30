@@ -264,7 +264,7 @@ pub async fn find_note(
     debug!("finding note(s) with filters: {:?}", filters);
 
     let mut streamed_events = client
-        .stream_events(filters, Some(std::time::Duration::from_millis(800)))
+        .stream_events(filters, Some(std::time::Duration::from_millis(2000)))
         .await?;
 
     while let Some(event) = streamed_events.next().await {

@@ -298,8 +298,8 @@ impl RenderData {
         };
     }
 
-    pub async fn complete(&mut self, mut ndb: Ndb, keys: Keys, nip19: Nip19) -> Result<()> {
-        let (mut stream, sub_id) = {
+    pub async fn complete(&mut self, ndb: Ndb, keys: Keys, nip19: Nip19) -> Result<()> {
+        let mut stream = {
             let filter = renderdata_to_filter(self);
             if filter.is_empty() {
                 // should really never happen unless someone broke
@@ -313,7 +313,7 @@ impl RenderData {
             let filters = filter.iter().map(convert_filter).collect();
             let ndb = ndb.clone();
             tokio::spawn(async move { find_note(ndb, keys, filters, &nip19).await });
-            (stream, sub_id)
+            stream
         };
 
         let wait_for = Duration::from_secs(1);
@@ -361,9 +361,6 @@ impl RenderData {
             loops += 1;
         }
 
-        if let Err(err) = ndb.unsubscribe(sub_id) {
-            error!("error unsubscribing: {err}");
-        }
         Ok(())
     }
 }

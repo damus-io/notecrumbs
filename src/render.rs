@@ -6,7 +6,7 @@ use egui::{
     Color32, FontFamily, FontId, Mesh, Rect, RichText, Rounding, Shape, TextureHandle, Vec2,
     Visuals,
 };
-use log::{debug, error, warn};
+use tracing::{debug, error, warn};
 use nostr::event::kind::Kind;
 use nostr::types::{SingleLetterTag, Timestamp};
 use nostr_sdk::async_utility::futures_util::StreamExt;

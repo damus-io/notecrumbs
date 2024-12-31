@@ -6,10 +6,10 @@ use crate::{
 };
 use http_body_util::Full;
 use hyper::{body::Bytes, header, Request, Response, StatusCode};
-use log::{error, warn};
 use nostr_sdk::prelude::{Nip19, ToBech32};
 use nostrdb::{BlockType, Blocks, Mention, Note, Transaction};
 use std::io::Write;
+use tracing::{error, warn};
 
 pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
     for block in blocks.iter(note) {

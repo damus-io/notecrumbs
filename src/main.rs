@@ -7,10 +7,10 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use log::{error, info};
 use std::io::Write;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tracing::{error, info};
 
 use crate::{
     error::Error,
@@ -222,7 +222,9 @@ fn get_default_pfp() -> egui::ColorImage {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    env_logger::init();
+    use tracing_subscriber;
+
+    tracing_subscriber::fmt::init();
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
 

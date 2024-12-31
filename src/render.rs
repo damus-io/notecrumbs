@@ -251,6 +251,7 @@ pub async fn find_note(
     let _ = client.add_relay("wss://relay.damus.io").await;
     let _ = client.add_relay("wss://nostr.wine").await;
     let _ = client.add_relay("wss://nos.lol").await;
+    let expected_events = filters.len();
 
     let other_relays = nip19::nip19_relays(nip19);
     for relay in other_relays {
@@ -267,10 +268,17 @@ pub async fn find_note(
         .stream_events(filters, Some(std::time::Duration::from_millis(2000)))
         .await?;
 
+    let mut num_loops = 0;
     while let Some(event) = streamed_events.next().await {
         debug!("processing event {:?}", event);
         if let Err(err) = ndb.process_event(&event.as_json()) {
             error!("error processing event: {err}");
+        }
+
+        num_loops += 1;
+
+        if num_loops == expected_events {
+            break;
         }
     }
 

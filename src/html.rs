@@ -84,7 +84,6 @@ pub fn serve_note_html(
     // 5: formatted date
     // 6: pfp url
 
-    let txn = Transaction::new(&app.ndb)?;
     let note_key = match note_rd.note_rd {
         NoteRenderData::Note(note_key) => note_key,
         NoteRenderData::Missing(note_id) => {
@@ -92,6 +91,8 @@ pub fn serve_note_html(
             return Err(Error::NotFound);
         }
     };
+
+    let txn = Transaction::new(&app.ndb)?;
 
     let note = if let Ok(note) = app.ndb.get_note_by_key(&txn, note_key) {
         note

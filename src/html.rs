@@ -7,9 +7,83 @@ use crate::{
 use http_body_util::Full;
 use hyper::{body::Bytes, header, Request, Response, StatusCode};
 use nostr_sdk::prelude::{Nip19, ToBech32};
-use nostrdb::{BlockType, Blocks, Mention, Note, Transaction};
+use nostrdb::{BlockType, Blocks, Filter, Mention, Ndb, Note, Transaction};
 use std::io::Write;
 use tracing::{error, warn};
+
+fn blocktype_name(blocktype: &BlockType) -> &'static str {
+    match blocktype {
+        BlockType::MentionBech32 => "mention",
+        BlockType::Hashtag => "hashtag",
+        BlockType::Url => "url",
+        BlockType::Text => "text",
+        BlockType::MentionIndex => "indexed_mention",
+        BlockType::Invoice => "invoice",
+    }
+}
+
+pub fn serve_note_json(
+    ndb: &Ndb,
+    note_rd: &NoteAndProfileRenderData,
+) -> Result<Response<Full<Bytes>>, Error> {
+    let mut body: Vec<u8> = vec![];
+
+    let note_key = match note_rd.note_rd {
+        NoteRenderData::Note(note_key) => note_key,
+        NoteRenderData::Missing(note_id) => {
+            warn!("missing note_id {}", hex::encode(note_id));
+            return Err(Error::NotFound);
+        }
+    };
+
+    let txn = Transaction::new(ndb)?;
+
+    let note = if let Ok(note) = ndb.get_note_by_key(&txn, note_key) {
+        note
+    } else {
+        // 404
+        return Err(Error::NotFound);
+    };
+
+    write!(body, "{{\"note\":{},\"parsed_content\":[", &note.json()?)?;
+
+    if let Ok(blocks) = ndb.get_blocks_by_key(&txn, note_key) {
+        for (i, block) in blocks.iter(&note).enumerate() {
+            if i != 0 {
+                write!(body, ",")?;
+            }
+            write!(
+                body,
+                "{{\"{}\":{}}}",
+                blocktype_name(&block.blocktype()),
+                serde_json::to_string(block.as_str())?
+            )?;
+        }
+    };
+
+    write!(body, "]")?;
+
+    if let Ok(results) = ndb.query(
+        &txn,
+        &[Filter::new()
+            .authors([note.pubkey()])
+            .kinds([0])
+            .limit(1)
+            .build()],
+        1,
+    ) {
+        if let Some(profile_note) = results.first() {
+            write!(body, ",\"profile\":{}", profile_note.note.json()?)?;
+        }
+    }
+
+    writeln!(body, "}}")?;
+
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .status(StatusCode::OK)
+        .body(Full::new(Bytes::from(body)))?)
+}
 
 pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
     for block in blocks.iter(note) {

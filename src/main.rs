@@ -122,7 +122,14 @@ async fn serve(
     r: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, Error> {
     let is_png = r.uri().path().ends_with(".png");
-    let until = if is_png { 4 } else { 0 };
+    let is_json = r.uri().path().ends_with(".json");
+    let until = if is_png {
+        4
+    } else if is_json {
+        5
+    } else {
+        0
+    };
 
     let path_len = r.uri().path().len();
     let nip19 = match Nip19::from_bech32(&r.uri().path()[1..path_len - until]) {
@@ -166,6 +173,15 @@ async fn serve(
             .header(header::CONTENT_TYPE, "image/png")
             .status(StatusCode::OK)
             .body(Full::new(Bytes::from(data)))?)
+    } else if is_json {
+        match render_data {
+            RenderData::Note(note_rd) => html::serve_note_json(&app.ndb, &note_rd),
+            RenderData::Profile(_profile_rd) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Full::new(Bytes::from("todo: profile json")))?);
+            }
+        }
     } else {
         match render_data {
             RenderData::Note(note_rd) => html::serve_note_html(app, &nip19, &note_rd, r),

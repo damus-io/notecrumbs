@@ -6,7 +6,6 @@ use egui::{
     Color32, FontFamily, FontId, Mesh, Rect, RichText, Rounding, Shape, TextureHandle, Vec2,
     Visuals,
 };
-use tracing::{debug, error, warn};
 use nostr::event::kind::Kind;
 use nostr::types::{SingleLetterTag, Timestamp};
 use nostr_sdk::async_utility::futures_util::StreamExt;
@@ -18,6 +17,7 @@ use nostrdb::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use tokio::time::{timeout, Duration};
+use tracing::{debug, error, warn};
 
 const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
 

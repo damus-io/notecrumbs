@@ -232,9 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(addr).await?;
     info!("Listening on 0.0.0.0:3000");
 
-    // Since ndk-sdk will verify for us, we don't need to do it on the db side
     let cfg = Config::new();
-    cfg.skip_validation(true);
     let ndb = Ndb::new(".", &cfg).expect("ndb failed to open");
     let keys = Keys::generate();
     let timeout = get_env_timeout();

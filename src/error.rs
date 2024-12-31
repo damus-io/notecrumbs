@@ -14,6 +14,7 @@ pub enum Error {
     NostrClient(nostr_sdk::client::Error),
     Recv(RecvError),
     Io(std::io::Error),
+    Json(serde_json::Error),
     Generic(String),
     Timeout(tokio::time::error::Elapsed),
     Image(image::error::ImageError),
@@ -41,6 +42,12 @@ impl From<image::error::ImageError> for Error {
 impl From<http::uri::InvalidUri> for Error {
     fn from(_err: http::uri::InvalidUri) -> Self {
         Error::InvalidUri
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(err: serde_json::Error) -> Self {
+        Error::Json(err)
     }
 }
 
@@ -120,6 +127,7 @@ impl fmt::Display for Error {
             Error::NostrClient(e) => write!(f, "Nostr client error: {}", e),
             Error::NotFound => write!(f, "Not found"),
             Error::Recv(e) => write!(f, "Recieve error: {}", e),
+            Error::Json(e) => write!(f, "json error: {e}"),
             Error::InvalidNip19 => write!(f, "Invalid nip19 object"),
             Error::NothingToFetch => write!(f, "No data to fetch!"),
             Error::SliceErr => write!(f, "Array slice error"),

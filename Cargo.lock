@@ -1618,6 +1618,7 @@ dependencies = [
  "nostr",
  "nostr-sdk",
  "nostrdb",
+ "serde_json",
  "skia-safe",
  "tokio",
  "tracing",

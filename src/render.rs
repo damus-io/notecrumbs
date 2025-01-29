@@ -21,6 +21,17 @@ use tracing::{debug, error, warn};
 
 const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
 
+/// A trait for any render data type that can be completed by fetching missing data from the network.
+pub trait CompletableRenderData {
+    fn is_complete(&self) -> bool;
+
+    /// Returns a list of NostrDB filters that can be used to fetch missing data.
+    fn nostrdb_filters_to_complete(&self) -> Vec<nostrdb::Filter>;
+
+    /// Handle a new note that was fetched from the network, and attempt to complete itself.
+    fn handle_new_note(&mut self, ndb: &Ndb, txn: &Transaction, note: &Note<'_>);
+}
+
 pub enum NoteRenderData {
     Missing([u8; 32]),
     Note(NoteKey),
@@ -46,6 +57,35 @@ impl NoteRenderData {
     }
 }
 
+impl CompletableRenderData for NoteRenderData {
+    fn is_complete(&self) -> bool {
+        !self.needs_note()
+    }
+
+    fn nostrdb_filters_to_complete(&self) -> Vec<nostrdb::Filter> {
+        match self {
+            NoteRenderData::Missing(note_id) => vec![nostrdb::Filter::new()
+                .ids([note_id])
+                .kinds([1])
+                .limit(1)
+                .build()],
+            NoteRenderData::Note(_) => vec![],
+        }
+    }
+
+    fn handle_new_note(&mut self, _ndb: &Ndb, _txn: &Transaction, note: &Note<'_>) {
+        if let NoteRenderData::Missing(note_id) = self {
+            if note.id() == note_id {
+                if let Some(key) = note.key() {
+                    *self = NoteRenderData::Note(key);
+                } else {
+                    warn!("note has no key");
+                }
+            }
+        }
+    }
+}
+
 pub struct NoteAndProfileRenderData {
     pub note_rd: NoteRenderData,
     pub profile_rd: Option<ProfileRenderData>,
@@ -56,6 +96,32 @@ impl NoteAndProfileRenderData {
         Self {
             note_rd,
             profile_rd,
+        }
+    }
+}
+
+impl CompletableRenderData for NoteAndProfileRenderData {
+    fn is_complete(&self) -> bool {
+        self.note_rd.is_complete()
+            && self
+                .profile_rd
+                .as_ref()
+                .map(|prd| prd.is_complete())
+                .unwrap_or(true)
+    }
+
+    fn nostrdb_filters_to_complete(&self) -> Vec<nostrdb::Filter> {
+        let mut filters = self.note_rd.nostrdb_filters_to_complete();
+        if let Some(profile_rd) = self.profile_rd.as_ref() {
+            filters.extend(profile_rd.nostrdb_filters_to_complete());
+        }
+        filters
+    }
+
+    fn handle_new_note(&mut self, ndb: &Ndb, txn: &Transaction, note: &Note<'_>) {
+        self.note_rd.handle_new_note(ndb, txn, note);
+        if let Some(profile_rd) = self.profile_rd.as_mut() {
+            profile_rd.handle_new_note(ndb, txn, note);
         }
     }
 }
@@ -85,10 +151,91 @@ impl ProfileRenderData {
     }
 }
 
+impl CompletableRenderData for ProfileRenderData {
+    fn is_complete(&self) -> bool {
+        !self.needs_profile()
+    }
+
+    fn nostrdb_filters_to_complete(&self) -> Vec<nostrdb::Filter> {
+        match self {
+            ProfileRenderData::Missing(pubkey) => vec![nostrdb::Filter::new()
+                .authors([pubkey])
+                .kinds([0])
+                .limit(1)
+                .build()],
+            ProfileRenderData::Profile(_) => vec![],
+        }
+    }
+
+    fn handle_new_note(&mut self, ndb: &Ndb, txn: &Transaction, note: &Note<'_>) {
+        if let ProfileRenderData::Missing(pubkey) = self {
+            if note.kind() == 0 && note.pubkey() == pubkey {
+                if let Ok(profile_key) = ndb.get_profilekey_by_pubkey(txn, note.pubkey()) {
+                    *self = ProfileRenderData::Profile(profile_key);
+                }
+            }
+        }
+    }
+}
+
 /// Primary keys for the data we're interested in rendering
 pub enum RenderData {
-    Profile(Option<ProfileRenderData>),
+    Profile(Option<ProfileRenderData>, Vec<NoteAndProfileRenderData>),
     Note(NoteAndProfileRenderData),
+}
+
+impl CompletableRenderData for RenderData {
+    fn is_complete(&self) -> bool {
+        match self {
+            RenderData::Profile(profile_rd, notes_rd) => {
+                profile_rd
+                    .as_ref()
+                    .map(|prd| prd.is_complete())
+                    .unwrap_or(true)
+                    && notes_rd.iter().all(|nrd| nrd.is_complete())
+            }
+            RenderData::Note(note_and_profile_rd) => note_and_profile_rd.is_complete(),
+        }
+    }
+
+    fn nostrdb_filters_to_complete(&self) -> Vec<nostrdb::Filter> {
+        if self.is_complete() {
+            return vec![];
+        }
+        let mut filters: Vec<nostrdb::Filter> = Vec::new();
+        match self {
+            RenderData::Profile(profile_render_data, notes_render_data) => {
+                if let Some(profile_render_data) = profile_render_data {
+                    filters.extend(profile_render_data.nostrdb_filters_to_complete());
+                }
+                filters.extend(
+                    notes_render_data
+                        .iter()
+                        .flat_map(|nrd| nrd.nostrdb_filters_to_complete()),
+                );
+            }
+            RenderData::Note(note_and_profile_render_data) => {
+                filters.extend(note_and_profile_render_data.nostrdb_filters_to_complete());
+            }
+        }
+        filters
+    }
+
+    fn handle_new_note(&mut self, ndb: &Ndb, txn: &Transaction, note: &Note<'_>) {
+        match self {
+            RenderData::Profile(profile_rd, notes_rd) => {
+                if let Some(profile_rd) = profile_rd {
+                    profile_rd.handle_new_note(ndb, txn, note);
+                }
+                for nrd in notes_rd {
+                    nrd.handle_new_note(ndb, txn, note);
+                }
+            }
+            RenderData::Note(note_and_profile_rd) => {
+                note_and_profile_rd.handle_new_note(ndb, txn, note);
+            }
+        }
+    }
 }
 
 impl RenderData {
@@ -96,78 +243,12 @@ impl RenderData {
         Self::Note(NoteAndProfileRenderData::new(note_rd, profile_rd))
     }
 
-    pub fn profile(profile_rd: Option<ProfileRenderData>) -> Self {
-        Self::Profile(profile_rd)
+    pub fn profile(
+        profile_rd: Option<ProfileRenderData>,
+        notes_rd: Vec<NoteAndProfileRenderData>,
+    ) -> Self {
+        Self::Profile(profile_rd, notes_rd)
     }
-
-    pub fn is_complete(&self) -> bool {
-        !(self.needs_profile() || self.needs_note())
-    }
-
-    pub fn note_render_data(&self) -> Option<&NoteRenderData> {
-        match self {
-            Self::Note(nrd) => Some(&nrd.note_rd),
-            Self::Profile(_) => None,
-        }
-    }
-
-    pub fn profile_render_data(&self) -> Option<&ProfileRenderData> {
-        match self {
-            Self::Note(nrd) => nrd.profile_rd.as_ref(),
-            Self::Profile(prd) => prd.as_ref(),
-        }
-    }
-
-    pub fn needs_profile(&self) -> bool {
-        match self {
-            RenderData::Profile(profile_rd) => profile_rd
-                .as_ref()
-                .map(|prd| prd.needs_profile())
-                .unwrap_or(true),
-            RenderData::Note(note) => note
-                .profile_rd
-                .as_ref()
-                .map(|prd| prd.needs_profile())
-                .unwrap_or(true),
-        }
-    }
-
-    pub fn needs_note(&self) -> bool {
-        match self {
-            RenderData::Profile(_pkey) => false,
-            RenderData::Note(rd) => rd.note_rd.needs_note(),
-        }
-    }
-}
-
-fn renderdata_to_filter(render_data: &RenderData) -> Vec<nostrdb::Filter> {
-    if render_data.is_complete() {
-        return vec![];
-    }
-
-    let mut filters = Vec::with_capacity(2);
-
-    match render_data.note_render_data() {
-        Some(NoteRenderData::Missing(note_id)) => {
-            filters.push(nostrdb::Filter::new().ids([note_id]).limit(1).build());
-        }
-        None | Some(NoteRenderData::Note(_)) => {}
-    }
-
-    match render_data.profile_render_data() {
-        Some(ProfileRenderData::Missing(pubkey)) => {
-            filters.push(
-                nostrdb::Filter::new()
-                    .authors([pubkey])
-                    .kinds([0])
-                    .limit(1)
-                    .build(),
-            );
-        }
-        None | Some(ProfileRenderData::Profile(_)) => {}
-    }
-
-    filters
 }
 
 fn convert_filter(ndb_filter: &nostrdb::Filter) -> nostr::types::Filter {
@@ -286,9 +367,9 @@ pub async fn find_note(
 }
 
 impl RenderData {
-    fn set_profile_key(&mut self, key: ProfileKey) {
+    fn _set_profile_key(&mut self, key: ProfileKey) {
         match self {
-            RenderData::Profile(pk) => {
+            RenderData::Profile(pk, _) => {
                 *pk = Some(ProfileRenderData::Profile(key));
             }
             RenderData::Note(note_rd) => {
@@ -297,18 +378,25 @@ impl RenderData {
         };
     }
 
-    fn set_note_key(&mut self, key: NoteKey) {
+    /// Set the note key in the render data, when we find the note within NostrDB.
+    ///
+    /// Notes:
+    /// - This is used to complete the render data.
+    /// - This is only applicable to render objects that expect a single note.
+    /// - This is not applicable to render objects that expect multiple notes.
+    fn _set_note_key(&mut self, key: NoteKey) {
         match self {
-            RenderData::Profile(_pk) => {}
+            RenderData::Profile(_pk, _) => {}
             RenderData::Note(note) => {
                 note.note_rd = NoteRenderData::Note(key);
             }
         };
     }
 
+    /// Attempt to complete the render data by fetching missing data from the network.
     pub async fn complete(&mut self, ndb: Ndb, keys: Keys, nip19: Nip19) -> Result<()> {
         let mut stream = {
-            let filter = renderdata_to_filter(self);
+            let filter = self.nostrdb_filters_to_complete();
             if filter.is_empty() {
                 // should really never happen unless someone broke
                 // needs_note and needs_profile
@@ -352,13 +440,7 @@ impl RenderData {
                         continue;
                     };
 
-                    if note.kind() == 0 {
-                        if let Ok(profile_key) = ndb.get_profilekey_by_pubkey(&txn, note.pubkey()) {
-                            self.set_profile_key(profile_key);
-                        }
-                    } else {
-                        self.set_note_key(note_key);
-                    }
+                    self.handle_new_note(&ndb, &txn, &note);
                 }
             }
 
@@ -427,28 +509,53 @@ pub fn get_render_data(ndb: &Ndb, txn: &Transaction, nip19: &Nip19) -> Result<Re
 
         Nip19::Profile(nprofile) => {
             let pubkey = nprofile.public_key.serialize();
-            let profile_rd = if let Ok(profile_key) = ndb.get_profilekey_by_pubkey(txn, &pubkey) {
-                ProfileRenderData::Profile(profile_key)
-            } else {
-                ProfileRenderData::Missing(pubkey)
-            };
-
-            Ok(RenderData::profile(Some(profile_rd)))
+            Ok(get_user_profile_render_data_from(&pubkey, ndb, txn)?)
         }
 
         Nip19::Pubkey(public_key) => {
             let pubkey = public_key.serialize();
-            let profile_rd = if let Ok(profile_key) = ndb.get_profilekey_by_pubkey(txn, &pubkey) {
-                ProfileRenderData::Profile(profile_key)
-            } else {
-                ProfileRenderData::Missing(pubkey)
-            };
-
-            Ok(RenderData::profile(Some(profile_rd)))
+            Ok(get_user_profile_render_data_from(&pubkey, ndb, txn)?)
         }
 
         _ => Err(Error::CantRender),
     }
+}
+
+fn get_user_profile_render_data_from(
+    pubkey: &[u8; 32],
+    ndb: &Ndb,
+    txn: &Transaction,
+) -> Result<RenderData> {
+    let profile_rd = if let Ok(profile_key) = ndb.get_profilekey_by_pubkey(txn, pubkey) {
+        ProfileRenderData::Profile(profile_key)
+    } else {
+        ProfileRenderData::Missing(*pubkey)
+    };
+
+    let max_posts = 3;
+    let filter = nostrdb::Filter::new().kinds([1]).authors([pubkey]).build();
+    let notes_query_results = ndb.query(txn, &[filter], max_posts)?;
+
+    let mut notes_rd = Vec::with_capacity(notes_query_results.len());
+    for query_result in notes_query_results {
+        let note_key = query_result.note_key;
+        let note = query_result.note;
+        let note_rd = NoteRenderData::Note(note_key);
+        let pk = note.pubkey();
+        let note_author_profile_rd = {
+            if let Ok(profile_key) = ndb.get_profilekey_by_pubkey(txn, pk) {
+                ProfileRenderData::Profile(profile_key)
+            } else {
+                ProfileRenderData::Missing(*pk)
+            }
+        };
+        notes_rd.push(NoteAndProfileRenderData::new(
+            note_rd,
+            Some(note_author_profile_rd),
+        ));
+    }
+
+    Ok(RenderData::profile(Some(profile_rd), notes_rd))
 }
 
 fn render_username(ui: &mut egui::Ui, profile: Option<&ProfileRecord>) {
@@ -766,7 +873,7 @@ pub fn render_note(ndb: &Notecrumbs, render_data: &RenderData) -> Vec<u8> {
             Some(options),
         ),
 
-        RenderData::Profile(profile_rd) => rasterize(
+        RenderData::Profile(profile_rd, _) => rasterize(
             (1200, 600),
             |ctx| profile_ui(ndb, ctx, profile_rd.as_ref()),
             Some(options),

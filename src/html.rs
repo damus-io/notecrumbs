@@ -4,12 +4,14 @@ use crate::{
     render::{NoteAndProfileRenderData, NoteRenderData, ProfileRenderData},
     Notecrumbs,
 };
+use handlebars::Handlebars;
 use http_body_util::Full;
 use hyper::{body::Bytes, header, Request, Response, StatusCode};
 use nostr_sdk::prelude::{Nip19, ToBech32};
 use nostrdb::{BlockType, Blocks, Filter, Mention, Ndb, Note, Transaction};
+use serde_json::{json, Value};
 use std::io::Write;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 fn blocktype_name(blocktype: &BlockType) -> &'static str {
     match blocktype {
@@ -26,8 +28,20 @@ pub fn serve_note_json(
     ndb: &Ndb,
     note_rd: &NoteAndProfileRenderData,
 ) -> Result<Response<Full<Bytes>>, Error> {
-    let mut body: Vec<u8> = vec![];
+    let txn = Transaction::new(ndb)?;
+    let body = note_render_data_to_json(ndb, &txn, note_rd)?;
 
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .status(StatusCode::OK)
+        .body(Full::new(Bytes::from(body.to_string())))?)
+}
+
+pub fn note_render_data_to_json(
+    ndb: &Ndb,
+    txn: &Transaction,
+    note_rd: &NoteAndProfileRenderData,
+) -> Result<Value, Error> {
     let note_key = match note_rd.note_rd {
         NoteRenderData::Note(note_key) => note_key,
         NoteRenderData::Missing(note_id) => {
@@ -36,35 +50,39 @@ pub fn serve_note_json(
         }
     };
 
-    let txn = Transaction::new(ndb)?;
+    debug!("Getting note and parsed content");
 
-    let note = if let Ok(note) = ndb.get_note_by_key(&txn, note_key) {
-        note
-    } else {
-        // 404
-        return Err(Error::NotFound);
-    };
+    let note = ndb
+        .get_note_by_key(txn, note_key)
+        .map_err(|_| Error::NotFound)?;
 
-    write!(body, "{{\"note\":{},\"parsed_content\":[", &note.json()?)?;
+    debug!("Got note");
 
-    if let Ok(blocks) = ndb.get_blocks_by_key(&txn, note_key) {
-        for (i, block) in blocks.iter(&note).enumerate() {
-            if i != 0 {
-                write!(body, ",")?;
-            }
-            write!(
-                body,
-                "{{\"{}\":{}}}",
-                blocktype_name(&block.blocktype()),
-                serde_json::to_string(block.as_str())?
-            )?;
+    let mut parsed_content = Vec::new();
+
+    if let Ok(blocks) = ndb.get_blocks_by_key(txn, note_key) {
+        for block in blocks.iter(&note) {
+            parsed_content.push(json!({
+                blocktype_name(&block.blocktype()): block.as_str()
+            }));
         }
-    };
+    }
 
-    write!(body, "]")?;
+    debug!("Got blocks");
+
+    let note_json = note.json().map_err(|_| Error::CantRender)?;
+
+    debug!("Got note json");
+
+    let mut result = json!({
+        "note": serde_json::from_str::<Value>(&note_json)?,
+        "parsed_content": parsed_content
+    });
+
+    debug!("Got note and parsed content");
 
     if let Ok(results) = ndb.query(
-        &txn,
+        txn,
         &[Filter::new()
             .authors([note.pubkey()])
             .kinds([0])
@@ -72,17 +90,17 @@ pub fn serve_note_json(
             .build()],
         1,
     ) {
+        debug!("Got results");
         if let Some(profile_note) = results.first() {
-            write!(body, ",\"profile\":{}", profile_note.note.json()?)?;
+            debug!("Got profile note");
+            result.as_object_mut().unwrap().insert(
+                "profile".to_string(),
+                serde_json::from_str(&profile_note.note.json()?)?,
+            );
         }
     }
 
-    writeln!(body, "}}")?;
-
-    Ok(Response::builder()
-        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
-        .status(StatusCode::OK)
-        .body(Full::new(Bytes::from(body)))?)
+    Ok(result)
 }
 
 pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
@@ -139,6 +157,61 @@ pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
             }
         };
     }
+}
+
+pub fn note_json_html(note_json: &Value) -> Result<String, Error> {
+    let reg = Handlebars::new();
+
+    let template_contents = std::fs::read_to_string("./html_templates/note.hbs").map_err(|e| {
+        error!("Failed to read profile template: {:?}", e);
+        Error::CantRender
+    })?;
+
+    let parsed_profile_content =
+        serde_json::from_str::<Value>(note_json["profile"]["content"].as_str().unwrap_or(""))?;
+
+    let display_name = if parsed_profile_content["display_name"]
+        .as_str()
+        .unwrap_or_default()
+        .is_empty()
+    {
+        parsed_profile_content["name"]
+            .as_str()
+            .unwrap_or("nostrich")
+    } else {
+        parsed_profile_content["display_name"].as_str().unwrap()
+    };
+
+    let created_at = note_json["note"]["created_at"].as_i64().unwrap(); // unix timestamp
+    let seconds_ago = chrono::Utc::now().timestamp() - created_at;
+    let human_readable_relative_time = if seconds_ago < 60 {
+        "just now".to_string()
+    } else if seconds_ago < 3600 {
+        format!("{}m ago", seconds_ago / 60)
+    } else if seconds_ago < 86400 {
+        format!("{}h ago", seconds_ago / 3600)
+    } else {
+        format!("{}d ago", seconds_ago / 86400)
+    };
+
+    // Create a new JSON object with the profile content, alongside the rest of the note JSON
+    let note_json = json!({
+        "note": note_json["note"],
+        "parsed_content": note_json["parsed_content"],
+        "profile": note_json["parsed_content"],
+        "parsed_profile": parsed_profile_content,
+        "display_name": display_name,
+        "human_readable_relative_time": human_readable_relative_time
+    });
+
+    let page_contents = reg
+        .render_template(&template_contents, &note_json)
+        .map_err(|e| {
+            error!("Error rendering template: {:?}", e);
+            Error::CantRender
+        })?;
+
+    Ok(page_contents)
 }
 
 pub fn serve_note_html(
@@ -220,7 +293,7 @@ pub fn serve_note_html(
           <meta name="twitter:card" content="summary_large_image" />
           <meta name="twitter:title" content="{0} on nostr" />
           <meta name="twitter:description" content="{1}" />
-      
+
         </head>
         <body>
           <main>

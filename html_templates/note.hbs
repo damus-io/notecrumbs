@@ -1,0 +1,30 @@
+<div class="flex flex-col border-t border-b border-black/10 dark:border-white/10">
+    <div class="p-4">
+        <div class="flex justify-between items-center">
+            <div class="flex space-x-4">
+                <img class="w-10 h-10 rounded-full" src={{parsed_profile.picture}} alt={{display_name}}>
+                <div class="flex flex-col justify-center">
+                    <div class="flex items-center gap-1">
+                        <span class="font-bold text-black dark:text-white">{{display_name}}</span>
+                        <span class="text-gray-300 dark:text-gray-500 text-sm">·</span>
+                        <span class="text-gray-400 text-sm">{{human_readable_relative_time}}</span>
+                    </div>
+                    <span class="text-gray-500 dark:text-gray-400 text-sm">@{{parsed_profile.name}}</span>
+                </div>
+            </div>
+        </div>
+        <p class="mt-2 text-gray-800 dark:text-white break-all">
+            {{#each parsed_content}}
+                {{#if this.text}}
+                    {{this.text}}
+                {{else if this.mention}}
+                    <a href="https://damus.io/{{this.mention}}" class="text-damuspink-500">{{this.mention}}</a>
+                {{else if this.mention}}
+                    <a href="https://damus.io/{{this.mention}}" class="text-damuspink-500">{{this.mention}}</a>
+                {{else if this.url}}
+                    <a href="{{this.url}}" class="text-damuspink-500">{{this.url}}</a>
+                {{/if}}
+            {{/each}}
+        </p>
+    </div>
+</div>

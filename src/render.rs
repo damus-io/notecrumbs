@@ -267,7 +267,6 @@ fn build_address_filter(author: &[u8; 32], kind: u64, identifier: &str) -> nostr
     if !identifier.is_empty() {
         let ident = identifier.to_string();
         filter = filter.tags(vec![ident], 'd');
-        filter = filter.tags(vec![coordinate_tag(author, kind, identifier)], 'a');
     }
     filter.limit(1).build()
 }

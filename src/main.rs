@@ -7,7 +7,6 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use std::io::Write;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -17,7 +16,7 @@ use crate::{
     render::{ProfileRenderData, RenderData},
 };
 use nostr_sdk::prelude::*;
-use nostrdb::{Config, Ndb, Transaction};
+use nostrdb::{Config, Ndb, NoteKey, Transaction};
 use std::time::Duration;
 
 use lru::LruCache;
@@ -29,16 +28,19 @@ mod gradient;
 mod html;
 mod nip19;
 mod pfp;
+mod relay_pool;
 mod render;
 
 use crate::secp256k1::XOnlyPublicKey;
+use relay_pool::RelayPool;
 
 type ImageCache = LruCache<XOnlyPublicKey, egui::TextureHandle>;
 
 #[derive(Clone)]
 pub struct Notecrumbs {
     pub ndb: Ndb,
-    keys: Keys,
+    _keys: Keys,
+    relay_pool: Arc<RelayPool>,
     font_data: egui::FontData,
     _img_cache: Arc<ImageCache>,
     default_pfp: egui::ImageData,
@@ -67,54 +69,6 @@ pub fn floor_char_boundary(s: &str, index: usize) -> usize {
 fn is_utf8_char_boundary(c: u8) -> bool {
     // This is bit magic equivalent to: b < 128 || b >= 192
     (c as i8) >= -0x40
-}
-
-fn serve_profile_html(
-    app: &Notecrumbs,
-    _nip: &Nip19,
-    profile_rd: Option<&ProfileRenderData>,
-    _r: Request<hyper::body::Incoming>,
-) -> Result<Response<Full<Bytes>>, Error> {
-    let mut data = Vec::new();
-
-    let profile_key = match profile_rd {
-        None | Some(ProfileRenderData::Missing(_)) => {
-            let _ = write!(data, "Profile not found :(");
-            return Ok(Response::builder()
-                .header(header::CONTENT_TYPE, "text/html")
-                .status(StatusCode::NOT_FOUND)
-                .body(Full::new(Bytes::from(data)))?);
-        }
-
-        Some(ProfileRenderData::Profile(profile_key)) => *profile_key,
-    };
-
-    let txn = Transaction::new(&app.ndb)?;
-
-    let profile_rec = if let Ok(profile_rec) = app.ndb.get_profile_by_key(&txn, profile_key) {
-        profile_rec
-    } else {
-        let _ = write!(data, "Profile not found :(");
-        return Ok(Response::builder()
-            .header(header::CONTENT_TYPE, "text/html")
-            .status(StatusCode::NOT_FOUND)
-            .body(Full::new(Bytes::from(data)))?);
-    };
-
-    let _ = write!(
-        data,
-        "{}",
-        profile_rec
-            .record()
-            .profile()
-            .and_then(|p| p.name())
-            .unwrap_or("nostrich")
-    );
-
-    Ok(Response::builder()
-        .header(header::CONTENT_TYPE, "text/html")
-        .status(StatusCode::OK)
-        .body(Full::new(Bytes::from(data)))?)
 }
 
 async fn serve(
@@ -159,10 +113,40 @@ async fn serve(
     // fetch extra data if we are missing it
     if !render_data.is_complete() {
         if let Err(err) = render_data
-            .complete(app.ndb.clone(), app.keys.clone(), nip19.clone())
+            .complete(app.ndb.clone(), app.relay_pool.clone(), nip19.clone())
             .await
         {
             error!("Error fetching completion data: {err}");
+        }
+    }
+
+    if let RenderData::Profile(profile_opt) = &render_data {
+        let maybe_pubkey = {
+            let txn = Transaction::new(&app.ndb)?;
+            match profile_opt {
+                Some(ProfileRenderData::Profile(profile_key)) => {
+                    if let Ok(profile_rec) = app.ndb.get_profile_by_key(&txn, *profile_key) {
+                        let note_key = NoteKey::new(profile_rec.record().note_key());
+                        if let Ok(profile_note) = app.ndb.get_note_by_key(&txn, note_key) {
+                            Some(*profile_note.pubkey())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                Some(ProfileRenderData::Missing(pk)) => Some(*pk),
+                None => None,
+            }
+        };
+
+        if let Some(pubkey) = maybe_pubkey {
+            if let Err(err) =
+                render::fetch_profile_feed(app.relay_pool.clone(), app.ndb.clone(), pubkey).await
+            {
+                error!("Error fetching profile feed: {err}");
+            }
         }
     }
 
@@ -186,7 +170,7 @@ async fn serve(
         match render_data {
             RenderData::Note(note_rd) => html::serve_note_html(app, &nip19, &note_rd, r),
             RenderData::Profile(profile_rd) => {
-                serve_profile_html(app, &nip19, profile_rd.as_ref(), r)
+                html::serve_profile_html(app, &nip19, profile_rd.as_ref(), r)
             }
         }
     }
@@ -252,6 +236,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ndb = Ndb::new(".", &cfg).expect("ndb failed to open");
     let keys = Keys::generate();
     let timeout = get_env_timeout();
+    let relay_pool = Arc::new(
+        RelayPool::new(
+            keys.clone(),
+            &["wss://relay.damus.io", "wss://nostr.wine", "wss://nos.lol"],
+            timeout,
+        )
+        .await?,
+    );
     let img_cache = Arc::new(LruCache::new(std::num::NonZeroUsize::new(64).unwrap()));
     let default_pfp = egui::ImageData::Color(Arc::new(get_default_pfp()));
     let background = egui::ImageData::Color(Arc::new(get_gradient()));
@@ -259,7 +251,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let app = Notecrumbs {
         ndb,
-        keys,
+        _keys: keys,
+        relay_pool,
         _timeout: timeout,
         _img_cache: img_cache,
         background,

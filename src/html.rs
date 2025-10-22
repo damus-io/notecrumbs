@@ -7,8 +7,8 @@ use crate::{
 use ammonia::Builder as HtmlSanitizer;
 use http_body_util::Full;
 use hyper::{body::Bytes, header, Request, Response, StatusCode};
-use nostr_sdk::prelude::{Nip19, ToBech32};
-use nostrdb::{BlockType, Blocks, Filter, Mention, Ndb, Note, Transaction};
+use nostr_sdk::prelude::{EventId, Nip19, ToBech32};
+use nostrdb::{BlockType, Blocks, Filter, Mention, Ndb, Note, NoteKey, Transaction};
 use pulldown_cmark::{html, Options, Parser};
 use std::fmt::Write as _;
 use std::io::Write;
@@ -628,6 +628,369 @@ pub fn serve_note_html(
         main_content = main_content_html,
         bech32 = bech32,
         script = LOCAL_TIME_SCRIPT,
+    );
+
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "text/html")
+        .status(StatusCode::OK)
+        .body(Full::new(Bytes::from(data)))?)
+}
+
+pub fn serve_profile_html(
+    app: &Notecrumbs,
+    nip19: &Nip19,
+    profile_rd: Option<&ProfileRenderData>,
+    _r: Request<hyper::body::Incoming>,
+) -> Result<Response<Full<Bytes>>, Error> {
+    let mut data = Vec::new();
+
+    let Some(profile_rd) = profile_rd else {
+        let _ = write!(data, "Profile not found :(");
+        return Ok(Response::builder()
+            .header(header::CONTENT_TYPE, "text/html")
+            .status(StatusCode::NOT_FOUND)
+            .body(Full::new(Bytes::from(data)))?);
+    };
+
+    let txn = Transaction::new(&app.ndb)?;
+
+    let (profile_rec, profile_pubkey) = match profile_rd {
+        ProfileRenderData::Profile(profile_key) => {
+            let rec = match app.ndb.get_profile_by_key(&txn, *profile_key) {
+                Ok(rec) => rec,
+                Err(_) => {
+                    let _ = write!(data, "Profile not found :(");
+                    return Ok(Response::builder()
+                        .header(header::CONTENT_TYPE, "text/html")
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Full::new(Bytes::from(data)))?);
+                }
+            };
+
+            let mut pubkey = None;
+            if let Ok(profile_note) = app
+                .ndb
+                .get_note_by_key(&txn, NoteKey::new(rec.record().note_key()))
+            {
+                pubkey = Some(*profile_note.pubkey());
+            }
+
+            (rec, pubkey)
+        }
+        ProfileRenderData::Missing(pk) => {
+            let rec = match app.ndb.get_profile_by_pubkey(&txn, pk) {
+                Ok(rec) => rec,
+                Err(_) => {
+                    let _ = write!(data, "Profile not found :(");
+                    return Ok(Response::builder()
+                        .header(header::CONTENT_TYPE, "text/html")
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Full::new(Bytes::from(data)))?);
+                }
+            };
+
+            (rec, Some(*pk))
+        }
+    };
+
+    let profile_data = profile_rec.record().profile();
+    let mut display_name = String::new();
+    let mut username = String::new();
+    let mut about_html = None;
+    let mut nip05 = None;
+    let mut website = None;
+    let mut lud16 = None;
+    let mut banner = None;
+    let mut picture = None;
+
+    if let Some(profile) = profile_data {
+        if let Some(name) = profile.name() {
+            username = name.to_owned();
+        }
+        if let Some(display) = profile.display_name() {
+            display_name = display.to_owned();
+        }
+        if let Some(about) = profile.about() {
+            let escaped = html_escape::encode_text(about).into_owned();
+            about_html = Some(escaped.replace('\n', "<br />"));
+        }
+        if let Some(n) = profile.nip05() {
+            if !n.is_empty() {
+                nip05 = Some(html_escape::encode_text(n).into_owned());
+            }
+        }
+        if let Some(site) = profile.website() {
+            let trimmed = site.trim();
+            if !trimmed.is_empty() {
+                let href = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                    trimmed.to_owned()
+                } else {
+                    format!("https://{}", trimmed)
+                };
+                website = Some((
+                    html_escape::encode_double_quoted_attribute(&href).into_owned(),
+                    html_escape::encode_text(trimmed).into_owned(),
+                ));
+            }
+        }
+        if let Some(pay) = profile.lud16() {
+            if !pay.is_empty() {
+                lud16 = Some(html_escape::encode_text(pay).into_owned());
+            }
+        }
+        if let Some(pic) = profile.picture() {
+            if !pic.is_empty() {
+                picture = Some(pic.to_owned());
+            }
+        }
+        if let Some(b) = profile.banner() {
+            if !b.is_empty() {
+                banner = Some(b.to_owned());
+            }
+        }
+    }
+
+    if display_name.is_empty() {
+        if !username.is_empty() {
+            display_name = username.clone();
+        } else {
+            display_name = "nostrich".to_string();
+        }
+    }
+
+    let default_pfp_url = "https://damus.io/img/no-profile.svg";
+    let pfp_url = picture.unwrap_or_else(|| default_pfp_url.to_string());
+    let pfp_attr = html_escape::encode_double_quoted_attribute(&pfp_url).into_owned();
+
+    let username_display = if username.is_empty() {
+        String::new()
+    } else {
+        format!("@{}", html_escape::encode_text(&username))
+    };
+
+    let author_display_html = html_escape::encode_text(&display_name).into_owned();
+
+    let mut recent_notes_markup = String::new();
+    let mut has_recent_notes = false;
+
+    if let Some(pubkey) = profile_pubkey {
+        let author_ref = [&pubkey];
+        let note_filter = nostrdb::Filter::new()
+            .authors(author_ref)
+            .kinds([1])
+            .limit(6)
+            .build();
+
+        if let Ok(results) = app.ndb.query(&txn, &[note_filter], 6) {
+            for res in results {
+                if let Ok(note) = app.ndb.get_note_by_key(&txn, res.note_key) {
+                    let mut note_body = Vec::new();
+                    if let Some(blocks) = note
+                        .key()
+                        .and_then(|nk| app.ndb.get_blocks_by_key(&txn, nk).ok())
+                    {
+                        render_note_content(&mut note_body, &note, &blocks);
+                    } else {
+                        let _ = write!(note_body, "{}", html_escape::encode_text(note.content()));
+                    }
+
+                    let note_body_html = String::from_utf8(note_body).unwrap_or_default();
+                    let timestamp_value = note.created_at();
+                    let note_link = EventId::from_slice(note.id())
+                        .ok()
+                        .and_then(|id| id.to_bech32().ok())
+                        .map(|bech| format!("/{bech}"))
+                        .unwrap_or_default();
+                    let note_link_attr =
+                        html_escape::encode_double_quoted_attribute(&note_link).into_owned();
+
+                    let _ = write!(
+                        recent_notes_markup,
+                        r#"<div class="note profile-note">
+  <div class="note-header">
+    <img src="{pfp}" class="note-author-avatar" />
+    <div class="note-author-name">{author}</div>
+    <div class="note-header-separator">·</div>
+    <time class="note-timestamp" data-timestamp="{ts}" datetime="{ts}" title="{ts}">{ts}</time>
+  </div>
+  <div class="note-content">{body}</div>
+  <div class="note-actions-footer">
+    <a class="muted-link" href={href}>Open note</a>
+  </div>
+</div>
+"#,
+                        pfp = pfp_attr,
+                        author = author_display_html,
+                        ts = timestamp_value,
+                        body = note_body_html,
+                        href = note_link_attr,
+                    );
+                    has_recent_notes = true;
+                }
+            }
+        }
+    }
+
+    let hostname = "https://damus.io";
+    let bech32 = nip19.to_bech32().unwrap();
+    let canonical_url = format!("{}/{}", hostname, bech32);
+    let fallback_image_url = format!("{}/{}.png", hostname, bech32);
+
+    let og_image_url = if pfp_url == default_pfp_url {
+        fallback_image_url.clone()
+    } else {
+        pfp_url.clone()
+    };
+
+    let page_heading = "Profile";
+    let og_type = "website";
+
+    let about_for_meta = about_html
+        .as_ref()
+        .map(|html| html.replace("<br />", " "))
+        .unwrap_or_default();
+    let og_description_raw = if !about_for_meta.is_empty() {
+        collapse_whitespace(&about_for_meta)
+    } else {
+        format!("{} on nostr", &display_name)
+    };
+
+    let about_block = about_html
+        .as_ref()
+        .map(|html| format!(r#"<p class="profile-about">{}</p>"#, html))
+        .unwrap_or_default();
+
+    let nip05_block = nip05
+        .as_ref()
+        .map(|val| format!(r#"<div class="profile-nip05">✅ {}</div>"#, val))
+        .unwrap_or_default();
+
+    let lud16_block = lud16
+        .as_ref()
+        .map(|val| format!(r#"<div class="profile-lnurl">⚡ {}</div>"#, val))
+        .unwrap_or_default();
+
+    let website_block = website
+        .as_ref()
+        .map(|(href, label)| format!(r#"<a class="profile-website" href={}>{}</a>"#, href, label))
+        .unwrap_or_default();
+
+    let banner_block = banner
+        .as_ref()
+        .map(|url| {
+            let attr = html_escape::encode_double_quoted_attribute(url).into_owned();
+            format!(
+                r#"<img src="{}" class="profile-banner" alt="Profile banner image" />"#,
+                attr
+            )
+        })
+        .unwrap_or_default();
+
+    let recent_section = if has_recent_notes {
+        format!(
+            r#"<div class="profile-section">
+  <h4 class="section-heading">Recent notes</h4>
+  {}
+</div>"#,
+            recent_notes_markup
+        )
+    } else {
+        String::new()
+    };
+
+    let _ = write!(
+        data,
+        r#"
+        <html>
+        <head>
+          <title>{title} on nostr</title>
+          <link rel="stylesheet" href="https://damus.io/css/notecrumbs.css" type="text/css" />
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <meta name="apple-itunes-app" content="app-id=1628663131, app-argument=damus:nostr:{bech32}"/>
+          <meta charset="UTF-8">
+
+          <meta property="og:description" content="{og_description}" />
+          <meta property="og:image" content="{og_image}"/>
+          <meta property="og:image:alt" content="{title}: {og_description}" />
+          <meta property="og:image:height" content="600" />
+          <meta property="og:image:width" content="1200" />
+          <meta property="og:image:type" content="image/png" />
+          <meta property="og:site_name" content="Damus" />
+          <meta property="og:title" content="{title} on nostr" />
+          <meta property="og:url" content="{canonical}"/>
+          <meta name="og:type" content="{og_type}"/>
+          <meta name="twitter:image:src" content="{og_image}" />
+          <meta name="twitter:site" content="@damusapp" />
+          <meta name="twitter:card" content="summary_large_image" />
+          <meta name="twitter:title" content="{title} on nostr" />
+          <meta name="twitter:description" content="{og_description}" />
+      
+        </head>
+        <body>
+          <main>
+            <div class="container">
+                 <div class="top-menu">
+                   <a href="https://damus.io" target="_blank">
+                     <img src="https://damus.io/logo_icon.png" class="logo" />
+                   </a>
+                </div>
+                <h3 class="page-heading">{page_heading}</h3>
+                  <div class="note profile-card">
+                    {banner}
+                    <div class="profile-header">
+                       <img src="{pfp}" class="note-author-avatar" />
+                       <div class="profile-author-meta">
+                         <div class="note-author-name">{author}</div>
+                         {username}
+                         {nip05}
+                         {lud16}
+                         {website}
+                       </div>
+                    </div>
+                    {about}
+                  </div>
+                  {recent_section}
+                </div>
+               <div class="note-actions-footer">
+                 <a href="nostr:{bech32}" class="muted-link">Open with default Nostr client</a>
+               </div>
+            </main>
+            <footer>
+                <span class="footer-note">
+                  <a href="https://damus.io">Damus</a> is a decentralized social network app built on the Nostr protocol.
+                </span>
+                <span class="copyright-note">
+                  © Damus Nostr Inc.
+                </span>
+            </footer>
+            {time_script}
+        </body>
+    </html>
+    "#,
+        title = html_escape::encode_text(&display_name),
+        og_description = html_escape::encode_double_quoted_attribute(&og_description_raw),
+        og_image = html_escape::encode_double_quoted_attribute(&og_image_url),
+        canonical = html_escape::encode_double_quoted_attribute(&canonical_url),
+        og_type = og_type,
+        banner = banner_block,
+        pfp = pfp_attr,
+        author = author_display_html,
+        username = if username_display.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#"<div class="profile-username">{}</div>"#,
+                username_display
+            )
+        },
+        about = about_block,
+        nip05 = nip05_block,
+        lud16 = lud16_block,
+        website = website_block,
+        recent_section = recent_section,
+        page_heading = page_heading,
+        bech32 = bech32,
+        time_script = LOCAL_TIME_SCRIPT,
     );
 
     Ok(Response::builder()

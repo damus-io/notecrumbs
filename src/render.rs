@@ -24,6 +24,7 @@ use tracing::{debug, error, warn};
 const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_IMAGE_WIDTH: f32 = 900.0;
+const MAX_IMAGE_HEIGHT: f32 = 260.0;
 
 pub enum NoteRenderData {
     Missing([u8; 32]),
@@ -685,7 +686,7 @@ fn fetch_remote_image(url: &str) -> Result<ColorImage> {
     Ok(ColorImage::from_rgba_unmultiplied(size, &pixels))
 }
 
-fn render_image_from_url(ui: &mut egui::Ui, url: &str) -> bool {
+fn render_image_from_url(ui: &mut egui::Ui, url: &str, max_height: f32) -> bool {
     match fetch_remote_image(url) {
         Ok(color_image) => {
             let size = color_image.size;
@@ -695,11 +696,25 @@ fn render_image_from_url(ui: &mut egui::Ui, url: &str) -> bool {
 
             let width = size[0] as f32;
             let height = size[1] as f32;
-            let scale = if width > MAX_IMAGE_WIDTH {
+            let width_scale = if width > MAX_IMAGE_WIDTH {
                 MAX_IMAGE_WIDTH / width
             } else {
                 1.0
             };
+
+            let target_height = if max_height.is_finite() && max_height > 0.0 {
+                max_height.min(MAX_IMAGE_HEIGHT)
+            } else {
+                MAX_IMAGE_HEIGHT
+            };
+
+            let height_scale = if height > target_height {
+                target_height / height
+            } else {
+                1.0
+            };
+
+            let scale = width_scale.min(height_scale);
 
             let final_size = Vec2::new(width * scale, height * scale);
             let texture = ui.ctx().load_texture(
@@ -732,7 +747,16 @@ fn wrapped_body_blocks(
                 let url = block.as_str();
                 if is_image_url(url) {
                     flush_body_job(ui, &mut job);
-                    if !render_image_from_url(ui, url) {
+                    let available_height = ui.available_height();
+                    let mut max_height = MAX_IMAGE_HEIGHT;
+                    if available_height.is_finite() {
+                        let margin = ui.spacing().item_spacing.y;
+                        let permitted = available_height - margin;
+                        if permitted > 40.0 {
+                            max_height = permitted.min(MAX_IMAGE_HEIGHT);
+                        }
+                    }
+                    if !render_image_from_url(ui, url, max_height) {
                         push_job_text(&mut job, url, PURPLE);
                     }
                 } else {
@@ -871,12 +895,12 @@ fn note_ui(app: &Notecrumbs, ctx: &egui::Context, rd: &NoteAndProfileRenderData)
 
                     ui.with_layout(note_frame_align(), |ui| {
                         //egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(10.0, 50.0);
+                        ui.spacing_mut().item_spacing = Vec2::new(10.0, 30.0);
 
                         ui.vertical(|ui| {
-                            let desired = Vec2::new(desired_width, desired_height / 1.5);
-                            ui.set_max_size(desired);
-                            ui.set_min_size(desired);
+                            let min_height = desired_height / 1.6;
+                            ui.set_width(desired_width);
+                            ui.set_min_height(min_height);
 
                             if let Ok(note) = rd.note_rd.lookup(&txn, &app.ndb) {
                                 if let Some(blocks) = note

@@ -759,17 +759,18 @@ pub fn serve_profile_html(
     let author_display_html = html_escape::encode_text(&display_name).into_owned();
 
     let mut recent_notes_markup = String::new();
-    let mut has_recent_notes = false;
 
     if let Some(pubkey) = profile_pubkey {
         let author_ref = [&pubkey];
         let note_filter = nostrdb::Filter::new()
             .authors(author_ref)
             .kinds([1])
-            .limit(6)
+            .limit(20)
             .build();
 
-        if let Ok(results) = app.ndb.query(&txn, &[note_filter], 6) {
+        if let Ok(results) = app.ndb.query(&txn, &[note_filter], 20) {
+            let mut entries = Vec::new();
+
             for res in results {
                 if let Ok(note) = app.ndb.get_note_by_key(&txn, res.note_key) {
                     let mut note_body = Vec::new();
@@ -792,9 +793,17 @@ pub fn serve_profile_html(
                     let note_link_attr =
                         html_escape::encode_double_quoted_attribute(&note_link).into_owned();
 
-                    let _ = write!(
-                        recent_notes_markup,
-                        r#"<div class="note profile-note">
+                    entries.push((timestamp_value, note_body_html, note_link_attr));
+                }
+            }
+
+            entries.sort_by(|a, b| b.0.cmp(&a.0));
+            entries.truncate(6);
+
+            for (timestamp_value, note_body_html, note_link_attr) in entries {
+                let _ = write!(
+                    recent_notes_markup,
+                    r#"<div class="note profile-note">
   <div class="note-header">
     <img src="{pfp}" class="note-author-avatar" />
     <div class="note-author-name">{author}</div>
@@ -807,14 +816,12 @@ pub fn serve_profile_html(
   </div>
 </div>
 "#,
-                        pfp = pfp_attr,
-                        author = author_display_html,
-                        ts = timestamp_value,
-                        body = note_body_html,
-                        href = note_link_attr,
-                    );
-                    has_recent_notes = true;
-                }
+                    pfp = pfp_attr,
+                    author = author_display_html,
+                    ts = timestamp_value,
+                    body = note_body_html,
+                    href = note_link_attr,
+                );
             }
         }
     }
@@ -874,7 +881,9 @@ pub fn serve_profile_html(
         })
         .unwrap_or_default();
 
-    let recent_section = if has_recent_notes {
+    let recent_section = if recent_notes_markup.is_empty() {
+        String::new()
+    } else {
         format!(
             r#"<div class="profile-section">
   <h4 class="section-heading">Recent notes</h4>
@@ -882,8 +891,6 @@ pub fn serve_profile_html(
 </div>"#,
             recent_notes_markup
         )
-    } else {
-        String::new()
     };
 
     let _ = write!(

@@ -244,6 +244,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .await?,
     );
+    spawn_relay_pool_metrics_logger(relay_pool.clone());
     let img_cache = Arc::new(LruCache::new(std::num::NonZeroUsize::new(64).unwrap()));
     let default_pfp = egui::ImageData::Color(Arc::new(get_default_pfp()));
     let background = egui::ImageData::Color(Arc::new(get_gradient()));
@@ -282,4 +283,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         });
     }
+}
+
+fn spawn_relay_pool_metrics_logger(pool: Arc<RelayPool>) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            ticker.tick().await;
+            let (stats, tracked) = pool.relay_stats().await;
+            info!(
+                total_relays = tracked,
+                ensure_calls = stats.ensure_calls,
+                relays_added = stats.relays_added,
+                connect_successes = stats.connect_successes,
+                connect_failures = stats.connect_failures,
+                "relay pool metrics snapshot"
+            );
+        }
+    });
 }

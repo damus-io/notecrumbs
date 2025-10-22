@@ -10,10 +10,10 @@ use egui::{
 };
 use image::imageops::FilterType;
 use nostr::event::kind::Kind;
-use nostr::types::{SingleLetterTag, Timestamp};
+use nostr::types::{RelayUrl, SingleLetterTag, Timestamp};
 use nostr_sdk::async_utility::futures_util::StreamExt;
 use nostr_sdk::nips::nip19::Nip19;
-use nostr_sdk::prelude::{EventId, PublicKey};
+use nostr_sdk::prelude::{Event, EventId, PublicKey};
 use nostrdb::{
     Block, BlockType, Blocks, FilterElement, FilterField, Mention, Ndb, Note, NoteKey, ProfileKey,
     ProfileRecord, Transaction,
@@ -378,7 +378,12 @@ pub async fn fetch_profile_feed(
             .since(since)
             .limit(PROFILE_FEED_RECENT_LIMIT as u64)
             .build();
-        vec![convert_filter(&feed_filter)]
+        let relay_filter = nostrdb::Filter::new()
+            .authors(author_ref)
+            .kinds([Kind::RelayList.as_u16() as u64])
+            .limit(1)
+            .build();
+        vec![convert_filter(&feed_filter), convert_filter(&relay_filter)]
     };
 
     let mut stream = relay_pool
@@ -386,6 +391,14 @@ pub async fn fetch_profile_feed(
         .await?;
 
     while let Some(event) = stream.next().await {
+        if event.kind == Kind::RelayList {
+            let hints = collect_relay_hints(&event);
+            if !hints.is_empty() {
+                if let Err(err) = relay_pool.ensure_relays(hints).await {
+                    warn!("failed to add discovered relays: {err}");
+                }
+            }
+        }
         if let Err(err) = ndb.process_event(&event.as_json()) {
             error!("error processing profile feed event: {err}");
         }
@@ -447,11 +460,16 @@ impl RenderData {
                 break;
             }
 
-            let note_keys = if let Some(note_keys) = timeout(wait_for, stream.next()).await? {
-                note_keys
-            } else {
-                // end of stream?
-                break;
+            let note_keys = match timeout(wait_for, stream.next()).await {
+                Ok(Some(note_keys)) => note_keys,
+                Ok(None) => {
+                    // end of stream?
+                    break;
+                }
+                Err(_) => {
+                    loops += 1;
+                    continue;
+                }
             };
 
             let note_keys_len = note_keys.len();
@@ -493,6 +511,27 @@ impl RenderData {
             ))),
         }
     }
+}
+
+fn collect_relay_hints(event: &Event) -> Vec<RelayUrl> {
+    let mut relays = Vec::new();
+    for tag in event.tags.as_slice() {
+        let parts = tag.as_slice();
+        if parts.is_empty() {
+            continue;
+        }
+        let kind = parts[0].as_str();
+        if !matches!(kind, "r" | "relay" | "relays") {
+            continue;
+        }
+        if let Some(url) = tag.content() {
+            match RelayUrl::parse(url) {
+                Ok(relay) => relays.push(relay),
+                Err(err) => warn!("ignoring invalid relay hint {}: {}", url, err),
+            }
+        }
+    }
+    relays
 }
 
 /// Attempt to locate the render data locally. Anything missing from

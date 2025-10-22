@@ -359,10 +359,19 @@ pub async fn fetch_profile_feed(
 
     let filters = {
         let author_ref = [&pubkey];
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(Duration::from_secs(60 * 60 * 24 * 30))
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let since = cutoff
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         let feed_filter = nostrdb::Filter::new()
             .authors(author_ref)
             .kinds([1])
-            .limit(20)
+            .since(since)
+            .limit(40)
             .build();
         vec![convert_filter(&feed_filter)]
     };

@@ -500,7 +500,7 @@ pub fn get_render_data(ndb: &Ndb, txn: &Transaction, nip19: &Nip19) -> Result<Re
                     NoteRenderData::Address {
                         author,
                         kind,
-                        identifier: identifier.clone(),
+                        identifier,
                     }
                 }
             };

@@ -332,6 +332,10 @@ pub async fn find_note(
 
     let mut num_loops = 0;
     while let Some(event) = streamed_events.next().await {
+        if let Err(err) = ensure_relay_hints(&relay_pool, &event).await {
+            warn!("failed to apply relay hints: {err}");
+        }
+
         debug!("processing event {:?}", event);
         if let Err(err) = ndb.process_event(&event.as_json()) {
             error!("error processing event: {err}");
@@ -379,13 +383,8 @@ pub async fn fetch_profile_feed(
         .await?;
 
     while let Some(event) = stream.next().await {
-        if event.kind == Kind::RelayList {
-            let hints = collect_relay_hints(&event);
-            if !hints.is_empty() {
-                if let Err(err) = relay_pool.ensure_relays(hints).await {
-                    warn!("failed to add discovered relays: {err}");
-                }
-            }
+        if let Err(err) = ensure_relay_hints(&relay_pool, &event).await {
+            warn!("failed to apply relay hints: {err}");
         }
         if let Err(err) = ndb.process_event(&event.as_json()) {
             error!("error processing profile feed event: {err}");
@@ -526,6 +525,14 @@ fn collect_relay_hints(event: &Event) -> Vec<RelayUrl> {
         }
     }
     relays
+}
+
+async fn ensure_relay_hints(relay_pool: &Arc<RelayPool>, event: &Event) -> Result<()> {
+    let hints = collect_relay_hints(event);
+    if hints.is_empty() {
+        return Ok(());
+    }
+    relay_pool.ensure_relays(hints).await
 }
 
 /// Attempt to locate the render data locally. Anything missing from

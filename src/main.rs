@@ -7,7 +7,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use std::io::Write;
+use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -17,7 +17,7 @@ use crate::{
     render::{ProfileRenderData, RenderData},
 };
 use nostr_sdk::prelude::*;
-use nostrdb::{Config, Ndb, Transaction};
+use nostrdb::{Config, Ndb, NoteKey, Transaction};
 use std::time::Duration;
 
 use lru::LruCache;
@@ -29,10 +29,12 @@ mod gradient;
 mod html;
 mod nip19;
 mod pfp;
+mod relay_pool;
 mod render;
 mod timeout;
 
 use crate::secp256k1::XOnlyPublicKey;
+use relay_pool::RelayPool;
 
 type ImageCache = LruCache<XOnlyPublicKey, egui::TextureHandle>;
 
@@ -40,10 +42,12 @@ type ImageCache = LruCache<XOnlyPublicKey, egui::TextureHandle>;
 pub struct Notecrumbs {
     pub ndb: Ndb,
     keys: Keys,
+    relay_pool: Arc<RelayPool>,
     font_data: egui::FontData,
     _img_cache: Arc<ImageCache>,
     default_pfp: egui::ImageData,
     background: egui::ImageData,
+    prometheus_handle: PrometheusHandle,
 
     /// How long do we wait for remote note requests
     _timeout: Duration,
@@ -70,58 +74,18 @@ fn is_utf8_char_boundary(c: u8) -> bool {
     (c as i8) >= -0x40
 }
 
-fn serve_profile_html(
-    app: &Notecrumbs,
-    _nip: &Nip19,
-    profile_rd: Option<&ProfileRenderData>,
-    _r: Request<hyper::body::Incoming>,
-) -> Result<Response<Full<Bytes>>, Error> {
-    let mut data = Vec::new();
-
-    let profile_key = match profile_rd {
-        None | Some(ProfileRenderData::Missing(_)) => {
-            let _ = write!(data, "Profile not found :(");
-            return Ok(Response::builder()
-                .header(header::CONTENT_TYPE, "text/html")
-                .status(StatusCode::NOT_FOUND)
-                .body(Full::new(Bytes::from(data)))?);
-        }
-
-        Some(ProfileRenderData::Profile(profile_key)) => *profile_key,
-    };
-
-    let txn = Transaction::new(&app.ndb)?;
-
-    let profile_rec = if let Ok(profile_rec) = app.ndb.get_profile_by_key(&txn, profile_key) {
-        profile_rec
-    } else {
-        let _ = write!(data, "Profile not found :(");
-        return Ok(Response::builder()
-            .header(header::CONTENT_TYPE, "text/html")
-            .status(StatusCode::NOT_FOUND)
-            .body(Full::new(Bytes::from(data)))?);
-    };
-
-    let _ = write!(
-        data,
-        "{}",
-        profile_rec
-            .record()
-            .profile()
-            .and_then(|p| p.name())
-            .unwrap_or("nostrich")
-    );
-
-    Ok(Response::builder()
-        .header(header::CONTENT_TYPE, "text/html")
-        .status(StatusCode::OK)
-        .body(Full::new(Bytes::from(data)))?)
-}
-
 async fn serve(
     app: &Notecrumbs,
     r: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, Error> {
+    if r.uri().path() == "/metrics" {
+        let body = app.prometheus_handle.render();
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/plain; version=0.0.4")
+            .body(Full::new(Bytes::from(body)))?);
+    }
+
     let is_png = r.uri().path().ends_with(".png");
     let is_json = r.uri().path().ends_with(".json");
     let until = if is_png {
@@ -160,10 +124,40 @@ async fn serve(
     // fetch extra data if we are missing it
     if !render_data.is_complete() {
         if let Err(err) = render_data
-            .complete(app.ndb.clone(), app.keys.clone(), nip19.clone())
+            .complete(app.ndb.clone(), app.relay_pool.clone(), nip19.clone())
             .await
         {
             error!("Error fetching completion data: {err}");
+        }
+    }
+
+    if let RenderData::Profile(profile_opt) = &render_data {
+        let maybe_pubkey = {
+            let txn = Transaction::new(&app.ndb)?;
+            match profile_opt {
+                Some(ProfileRenderData::Profile(profile_key)) => {
+                    if let Ok(profile_rec) = app.ndb.get_profile_by_key(&txn, *profile_key) {
+                        let note_key = NoteKey::new(profile_rec.record().note_key());
+                        if let Ok(profile_note) = app.ndb.get_note_by_key(&txn, note_key) {
+                            Some(*profile_note.pubkey())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                Some(ProfileRenderData::Missing(pk)) => Some(*pk),
+                None => None,
+            }
+        };
+
+        if let Some(pubkey) = maybe_pubkey {
+            if let Err(err) =
+                render::fetch_profile_feed(app.relay_pool.clone(), app.ndb.clone(), pubkey).await
+            {
+                error!("Error fetching profile feed: {err}");
+            }
         }
     }
 
@@ -187,10 +181,16 @@ async fn serve(
         match render_data {
             RenderData::Note(note_rd) => html::serve_note_html(app, &nip19, &note_rd, r),
             RenderData::Profile(profile_rd) => {
-                serve_profile_html(app, &nip19, profile_rd.as_ref(), r)
+                html::serve_profile_html(app, &nip19, profile_rd.as_ref(), r)
             }
         }
     }
+}
+
+fn get_env_timeout() -> Duration {
+    let timeout_env = std::env::var("TIMEOUT_MS").unwrap_or("2000".to_string());
+    let timeout_ms: u64 = timeout_env.parse().unwrap_or(2000);
+    Duration::from_millis(timeout_ms)
 }
 
 fn get_gradient() -> egui::ColorImage {
@@ -247,6 +247,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ndb = Ndb::new(".", &cfg).expect("ndb failed to open");
     let keys = Keys::generate();
     let timeout = timeout::get_env_timeout();
+    let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .expect("install prometheus recorder");
+    let relay_pool = Arc::new(
+        RelayPool::new(
+            keys.clone(),
+            &["wss://relay.damus.io", "wss://nostr.wine", "wss://nos.lol"],
+            timeout,
+        )
+        .await?,
+    );
+    spawn_relay_pool_metrics_logger(relay_pool.clone());
     let img_cache = Arc::new(LruCache::new(std::num::NonZeroUsize::new(64).unwrap()));
     let default_pfp = egui::ImageData::Color(Arc::new(get_default_pfp()));
     let background = egui::ImageData::Color(Arc::new(get_gradient()));
@@ -255,11 +267,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app = Notecrumbs {
         ndb,
         keys,
-        _timeout: timeout,
-        _img_cache: img_cache,
-        background,
+        relay_pool,
         font_data,
+        _img_cache: img_cache,
         default_pfp,
+        background,
+        prometheus_handle,
+        _timeout: timeout,
     };
 
     // We start a loop to continuously accept incoming connections
@@ -284,4 +298,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         });
     }
+}
+
+fn spawn_relay_pool_metrics_logger(pool: Arc<RelayPool>) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            ticker.tick().await;
+            let (stats, tracked) = pool.relay_stats().await;
+            metrics::gauge!("relay_pool_known_relays", tracked as f64);
+            info!(
+                total_relays = tracked,
+                ensure_calls = stats.ensure_calls,
+                relays_added = stats.relays_added,
+                connect_successes = stats.connect_successes,
+                connect_failures = stats.connect_failures,
+                "relay pool metrics snapshot"
+            );
+        }
+    });
 }

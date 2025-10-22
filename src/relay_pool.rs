@@ -66,6 +66,7 @@ impl RelayPool {
     where
         I: IntoIterator<Item = RelayUrl>,
     {
+        metrics::counter!("relay_pool_ensure_calls_total", 1);
         let mut new_relays = Vec::new();
         let mut had_new = false;
         let mut relays_added = 0u64;
@@ -79,6 +80,10 @@ impl RelayPool {
                     relays_added += 1;
                 }
             }
+        }
+
+        if relays_added > 0 {
+            metrics::counter!("relay_pool_relays_added_total", relays_added);
         }
 
         let mut connect_success = 0u64;
@@ -95,6 +100,13 @@ impl RelayPool {
             } else {
                 connect_success += 1;
             }
+        }
+
+        if connect_success > 0 {
+            metrics::counter!("relay_pool_connect_success_total", connect_success);
+        }
+        if connect_failure > 0 {
+            metrics::counter!("relay_pool_connect_failure_total", connect_failure);
         }
 
         if had_new {
@@ -125,6 +137,12 @@ impl RelayPool {
             let mut stats = self.stats.lock().await;
             stats.ensure_calls += 1;
         }
+
+        let tracked = {
+            let guard = self.known_relays.lock().await;
+            guard.len()
+        };
+        metrics::gauge!("relay_pool_known_relays", tracked as f64);
 
         Ok(())
     }

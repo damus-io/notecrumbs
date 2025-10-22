@@ -3,9 +3,10 @@ use egui::epaint::Shadow;
 use egui::{
     pos2,
     text::{LayoutJob, TextFormat},
-    Color32, FontFamily, FontId, Mesh, Rect, RichText, Rounding, Shape, TextureHandle, Vec2,
-    Visuals,
+    Color32, ColorImage, FontFamily, FontId, Mesh, Rect, RichText, Rounding, Shape, TextureHandle,
+    Vec2, Visuals,
 };
+use image::imageops::FilterType;
 use nostr::event::kind::Kind;
 use nostr::types::{SingleLetterTag, Timestamp};
 use nostr_sdk::async_utility::futures_util::StreamExt;
@@ -16,10 +17,13 @@ use nostrdb::{
     ProfileRecord, Transaction,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, warn};
 
 const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
+const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_IMAGE_WIDTH: f32 = 900.0;
 
 pub enum NoteRenderData {
     Missing([u8; 32]),
@@ -591,14 +595,8 @@ fn push_job_user_mention(
     }
 }
 
-fn wrapped_body_blocks(
-    ui: &mut egui::Ui,
-    ndb: &Ndb,
-    note: &Note,
-    blocks: &Blocks,
-    txn: &Transaction,
-) {
-    let mut job = LayoutJob {
+fn new_body_layout_job() -> LayoutJob {
+    LayoutJob {
         justify: false,
         halign: egui::Align::LEFT,
         wrap: egui::text::TextWrapping {
@@ -608,11 +606,139 @@ fn wrapped_body_blocks(
             ..Default::default()
         },
         ..Default::default()
-    };
+    }
+}
+
+fn flush_body_job(ui: &mut egui::Ui, job: &mut LayoutJob) {
+    if job.sections.is_empty() {
+        return;
+    }
+
+    let job_to_show = std::mem::replace(job, new_body_layout_job());
+    ui.label(job_to_show);
+}
+
+pub(crate) fn is_image_url(url: &str) -> bool {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return false;
+    }
+
+    let trimmed = url
+        .split('#')
+        .next()
+        .unwrap_or(url)
+        .split('?')
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+
+    match trimmed.rsplit('.').next() {
+        Some(ext)
+            if matches!(
+                ext,
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "avif" | "jfif"
+            ) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn fetch_remote_image(url: &str) -> Result<ColorImage> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()?;
+
+    let response = client.get(url).send()?;
+
+    if !response.status().is_success() {
+        return Err(Error::Generic(format!(
+            "failed to fetch image {url}: status {}",
+            response.status()
+        )));
+    }
+
+    let bytes = response.bytes()?;
+
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(Error::TooBig);
+    }
+
+    let mut image = image::load_from_memory(&bytes)?;
+
+    if image.width() == 0 || image.height() == 0 {
+        return Err(Error::Generic(format!("image {url} has zero size")));
+    }
+
+    if image.width() as f32 > MAX_IMAGE_WIDTH {
+        let new_height = ((image.height() as f32) * (MAX_IMAGE_WIDTH / image.width() as f32))
+            .round()
+            .max(1.0) as u32;
+        image = image.resize_exact(MAX_IMAGE_WIDTH as u32, new_height, FilterType::Lanczos3);
+    }
+
+    let rgba = image.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    let pixels = rgba.into_raw();
+
+    Ok(ColorImage::from_rgba_unmultiplied(size, &pixels))
+}
+
+fn render_image_from_url(ui: &mut egui::Ui, url: &str) -> bool {
+    match fetch_remote_image(url) {
+        Ok(color_image) => {
+            let size = color_image.size;
+            if size[0] == 0 || size[1] == 0 {
+                return false;
+            }
+
+            let width = size[0] as f32;
+            let height = size[1] as f32;
+            let scale = if width > MAX_IMAGE_WIDTH {
+                MAX_IMAGE_WIDTH / width
+            } else {
+                1.0
+            };
+
+            let final_size = Vec2::new(width * scale, height * scale);
+            let texture = ui.ctx().load_texture(
+                format!("note-image:{url}"),
+                egui::ImageData::Color(Arc::new(color_image)),
+                Default::default(),
+            );
+            ui.add(egui::Image::new((texture.id(), final_size)));
+            true
+        }
+        Err(err) => {
+            warn!("failed to render image from {url}: {err}");
+            false
+        }
+    }
+}
+
+fn wrapped_body_blocks(
+    ui: &mut egui::Ui,
+    ndb: &Ndb,
+    note: &Note,
+    blocks: &Blocks,
+    txn: &Transaction,
+) {
+    let mut job = new_body_layout_job();
 
     for block in blocks.iter(note) {
         match block.blocktype() {
-            BlockType::Url => push_job_text(&mut job, block.as_str(), PURPLE),
+            BlockType::Url => {
+                let url = block.as_str();
+                if is_image_url(url) {
+                    flush_body_job(ui, &mut job);
+                    if !render_image_from_url(ui, url) {
+                        push_job_text(&mut job, url, PURPLE);
+                    }
+                } else {
+                    push_job_text(&mut job, url, PURPLE);
+                }
+            }
 
             BlockType::Hashtag => {
                 push_job_text(&mut job, "#", PURPLE);
@@ -653,7 +779,7 @@ fn wrapped_body_blocks(
         };
     }
 
-    ui.label(job);
+    flush_body_job(ui, &mut job);
 }
 
 fn wrapped_body_text(ui: &mut egui::Ui, text: &str) {
@@ -876,6 +1002,23 @@ mod tests {
 
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn image_url_detection_handles_common_extensions() {
+        assert!(is_image_url("https://example.com/cat.png"));
+        assert!(is_image_url("https://example.com/PHOTO.JPG"));
+        assert!(is_image_url("https://example.com/pic.webp?size=1024"));
+        assert!(is_image_url("https://example.com/path/file.avif#anchor"));
+    }
+
+    #[test]
+    fn image_url_detection_rejects_non_images() {
+        assert!(!is_image_url("https://example.com"));
+        assert!(!is_image_url(
+            "nostr:note1k8fwhsrgyyxd39zs5rzexfpknwzqxvg6gfxw0arjv9nwrsadn0hqcm2y3d"
+        ));
+        assert!(!is_image_url("https://example.com/not_an_image.png.txt"));
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub enum Error {
     Nip19(nip19::Error),
     Http(hyper::http::Error),
     Hyper(hyper::Error),
+    Reqwest(reqwest::Error),
     Nostrdb(nostrdb::Error),
     NostrClient(nostr_sdk::client::Error),
     Recv(RecvError),
@@ -87,6 +88,12 @@ impl From<hyper::Error> for Error {
     }
 }
 
+impl From<reqwest::Error> for Error {
+    fn from(err: reqwest::Error) -> Self {
+        Error::Reqwest(err)
+    }
+}
+
 impl From<TryFromSliceError> for Error {
     fn from(_: TryFromSliceError) -> Self {
         Error::SliceErr
@@ -138,6 +145,7 @@ impl fmt::Display for Error {
             Error::Timeout(elapsed) => write!(f, "Timeout error: {}", elapsed),
             Error::InvalidUri => write!(f, "Invalid url"),
             Error::Hyper(err) => write!(f, "Hyper error: {}", err),
+            Error::Reqwest(err) => write!(f, "Reqwest error: {}", err),
             Error::Generic(err) => write!(f, "Generic error: {}", err),
             Error::Io(err) => write!(f, "Io error: {}", err),
             Error::Secp(err) => write!(f, "Signature error: {}", err),

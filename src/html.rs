@@ -1,9 +1,7 @@
 use crate::Error;
 use crate::{
     abbrev::{abbrev_str, abbreviate},
-    render::{
-        is_image_url, NoteAndProfileRenderData, ProfileRenderData, PROFILE_FEED_RECENT_LIMIT,
-    },
+    render::{NoteAndProfileRenderData, ProfileRenderData, PROFILE_FEED_RECENT_LIMIT},
     Notecrumbs,
 };
 use ammonia::Builder as HtmlSanitizer;

@@ -13,20 +13,18 @@ use nostr::types::{RelayUrl, SingleLetterTag, Timestamp};
 use nostr_sdk::async_utility::futures_util::StreamExt;
 use nostr_sdk::nips::nip19::Nip19;
 use nostr_sdk::prelude::{Event, EventId, PublicKey};
+use nostr_sdk::JsonUtil;
 use nostrdb::{
     Block, BlockType, Blocks, FilterElement, FilterField, Mention, Ndb, Note, NoteKey, ProfileKey,
     ProfileRecord, Transaction,
 };
-use std::sync::Arc;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, warn};
 
 const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
-const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-const MAX_IMAGE_WIDTH: f32 = 900.0;
-const MAX_IMAGE_HEIGHT: f32 = 260.0;
 pub const PROFILE_FEED_RECENT_LIMIT: usize = 12;
 pub const PROFILE_FEED_LOOKBACK_DAYS: u64 = 30;
 
@@ -357,14 +355,14 @@ pub async fn fetch_profile_feed(
     ndb: Ndb,
     pubkey: [u8; 32],
 ) -> Result<()> {
-    use nostr_sdk::JsonUtil;
-
     let relay_targets = collect_profile_relays(relay_pool.clone(), ndb.clone(), pubkey).await?;
 
     let relay_targets_arc = Arc::new(relay_targets);
 
     let cutoff = SystemTime::now()
-        .checked_sub(Duration::from_secs(60 * 60 * 24 * PROFILE_FEED_LOOKBACK_DAYS))
+        .checked_sub(Duration::from_secs(
+            60 * 60 * 24 * PROFILE_FEED_LOOKBACK_DAYS,
+        ))
         .and_then(|ts| ts.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|dur| dur.as_secs());
 
@@ -554,8 +552,6 @@ async fn collect_profile_relays(
     ndb: Ndb,
     pubkey: [u8; 32],
 ) -> Result<Vec<RelayUrl>> {
-    use nostr_sdk::JsonUtil;
-
     relay_pool
         .ensure_relays(relay_pool.default_relays().iter().cloned())
         .await?;
@@ -624,19 +620,19 @@ async fn stream_profile_feed_once(
     pubkey: [u8; 32],
     since: Option<u64>,
 ) -> Result<usize> {
-    use nostr_sdk::JsonUtil;
+    let filter = {
+        let author_ref = [&pubkey];
+        let mut builder = nostrdb::Filter::new()
+            .authors(author_ref)
+            .kinds([1])
+            .limit(PROFILE_FEED_RECENT_LIMIT as u64);
 
-    let author_ref = [&pubkey];
-    let mut filter_builder = nostrdb::Filter::new()
-        .authors(author_ref)
-        .kinds([1])
-        .limit(PROFILE_FEED_RECENT_LIMIT as u64);
+        if let Some(since) = since {
+            builder = builder.since(since);
+        }
 
-    if let Some(since) = since {
-        filter_builder = filter_builder.since(since);
-    }
-
-    let filter = convert_filter(&filter_builder.build());
+        convert_filter(&builder.build())
+    };
     let mut stream = relay_pool
         .stream_events(vec![filter], &relays, Duration::from_millis(2000))
         .await?;

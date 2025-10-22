@@ -23,6 +23,11 @@ const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
 
 pub enum NoteRenderData {
     Missing([u8; 32]),
+    Address {
+        author: [u8; 32],
+        kind: u64,
+        identifier: String,
+    },
     Note(NoteKey),
 }
 
@@ -30,6 +35,7 @@ impl NoteRenderData {
     pub fn needs_note(&self) -> bool {
         match self {
             NoteRenderData::Missing(_) => true,
+            NoteRenderData::Address { .. } => true,
             NoteRenderData::Note(_) => false,
         }
     }
@@ -41,6 +47,11 @@ impl NoteRenderData {
     ) -> std::result::Result<Note<'a>, nostrdb::Error> {
         match self {
             NoteRenderData::Missing(note_id) => ndb.get_note_by_id(txn, note_id),
+            NoteRenderData::Address {
+                author,
+                kind,
+                identifier,
+            } => query_note_by_address(ndb, txn, author, *kind, identifier),
             NoteRenderData::Note(note_key) => ndb.get_note_by_key(txn, *note_key),
         }
     }
@@ -151,6 +162,13 @@ fn renderdata_to_filter(render_data: &RenderData) -> Vec<nostrdb::Filter> {
         Some(NoteRenderData::Missing(note_id)) => {
             filters.push(nostrdb::Filter::new().ids([note_id]).limit(1).build());
         }
+        Some(NoteRenderData::Address {
+            author,
+            kind,
+            identifier,
+        }) => {
+            filters.push(build_address_filter(author, *kind, identifier.as_str()));
+        }
         None | Some(NoteRenderData::Note(_)) => {}
     }
 
@@ -236,6 +254,45 @@ fn convert_filter(ndb_filter: &nostrdb::Filter) -> nostr::types::Filter {
     }
 
     filter
+}
+
+fn coordinate_tag(author: &[u8; 32], kind: u64, identifier: &str) -> String {
+    let pk_hex = hex::encode(author);
+    format!("{}:{}:{}", kind, pk_hex, identifier)
+}
+
+fn build_address_filter(author: &[u8; 32], kind: u64, identifier: &str) -> nostrdb::Filter {
+    let author_ref: [&[u8; 32]; 1] = [author];
+    let mut filter = nostrdb::Filter::new().authors(author_ref).kinds([kind]);
+    if !identifier.is_empty() {
+        let ident = identifier.to_string();
+        filter = filter.tags(vec![ident], 'd');
+    }
+    filter.limit(1).build()
+}
+
+fn query_note_by_address<'a>(
+    ndb: &Ndb,
+    txn: &'a Transaction,
+    author: &[u8; 32],
+    kind: u64,
+    identifier: &str,
+) -> std::result::Result<Note<'a>, nostrdb::Error> {
+    let mut results = ndb.query(txn, &[build_address_filter(author, kind, identifier)], 1)?;
+    if results.is_empty() && !identifier.is_empty() {
+        let coord_filter = nostrdb::Filter::new()
+            .authors([author])
+            .kinds([kind])
+            .tags(vec![coordinate_tag(author, kind, identifier)], 'a')
+            .limit(1)
+            .build();
+        results = ndb.query(txn, &[coord_filter], 1)?;
+    }
+    if let Some(result) = results.first() {
+        ndb.get_note_by_key(txn, result.note_key)
+    } else {
+        Err(nostrdb::Error::NotFound)
+    }
 }
 
 pub async fn find_note(
@@ -420,6 +477,40 @@ pub fn get_render_data(ndb: &Ndb, txn: &Transaction, nip19: &Nip19) -> Result<Re
                 NoteRenderData::Note(note_key)
             } else {
                 NoteRenderData::Missing(*evid.as_bytes())
+            };
+
+            Ok(RenderData::note(note_rd, profile_rd))
+        }
+
+        Nip19::Coordinate(coordinate) => {
+            let author = coordinate.public_key.serialize();
+            let kind: u64 = u16::from(coordinate.kind) as u64;
+            let identifier = coordinate.identifier.clone();
+
+            let note_rd = {
+                let filter = build_address_filter(&author, kind, identifier.as_str());
+                let note_key = ndb
+                    .query(txn, &[filter], 1)
+                    .ok()
+                    .and_then(|results| results.into_iter().next().map(|res| res.note_key));
+
+                if let Some(note_key) = note_key {
+                    NoteRenderData::Note(note_key)
+                } else {
+                    NoteRenderData::Address {
+                        author,
+                        kind,
+                        identifier: identifier.clone(),
+                    }
+                }
+            };
+
+            let profile_rd = {
+                if let Ok(profile_key) = ndb.get_profilekey_by_pubkey(txn, &author) {
+                    Some(ProfileRenderData::Profile(profile_key))
+                } else {
+                    Some(ProfileRenderData::Missing(author))
+                }
             };
 
             Ok(RenderData::note(note_rd, profile_rd))
@@ -746,6 +837,126 @@ fn profile_ui(app: &Notecrumbs, ctx: &egui::Context, profile_rd: Option<&Profile
             //body(ui, &profile.about);
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::nips::nip01::Coordinate;
+    use nostr::prelude::{EventBuilder, Keys, Tag};
+    use nostrdb::Config;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    fn temp_db_dir(prefix: &str) -> PathBuf {
+        let base = PathBuf::from("target/test-dbs");
+        let _ = fs::create_dir_all(&base);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let dir = base.join(format!("{}-{}", prefix, nanos));
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    fn wait_for_note(ndb: &Ndb, note_id: &[u8; 32]) {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            if let Ok(txn) = Transaction::new(ndb) {
+                if ndb.get_note_by_id(&txn, note_id).is_ok() {
+                    return;
+                }
+            }
+
+            if Instant::now() >= deadline {
+                panic!("timed out waiting for note ingestion");
+            }
+
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn build_address_filter_includes_only_d_tags() {
+        let author = [1u8; 32];
+        let identifier = "article-slug";
+        let kind = Kind::LongFormTextNote.as_u16() as u64;
+
+        let filter = build_address_filter(&author, kind, identifier);
+        let mut saw_d_tag = false;
+
+        for field in &filter {
+            if let FilterField::Tags(tag, elements) = field {
+                assert_eq!(tag, 'd', "unexpected tag '{}' in filter", tag);
+                let mut values: Vec<String> = Vec::new();
+                for element in elements {
+                    match element {
+                        FilterElement::Str(value) => values.push(value.to_owned()),
+                        other => panic!("unexpected tag element {:?}", other),
+                    }
+                }
+                assert_eq!(values, vec![identifier.to_owned()]);
+                saw_d_tag = true;
+            }
+        }
+
+        assert!(saw_d_tag, "expected filter to include a 'd' tag constraint");
+    }
+
+    #[test]
+    fn query_note_by_address_uses_d_and_a_tag_filters() {
+        let keys = Keys::generate();
+        let author = keys.public_key().to_bytes();
+        let kind = Kind::LongFormTextNote.as_u16() as u64;
+        let identifier_with_d = "with-d-tag";
+        let identifier_with_a = "only-a-tag";
+
+        let db_dir = temp_db_dir("address-filters");
+        let db_path = db_dir.to_string_lossy().to_string();
+        let cfg = Config::new().skip_validation(true);
+        let ndb = Ndb::new(&db_path, &cfg).expect("failed to open nostrdb");
+
+        let event_with_d = EventBuilder::long_form_text_note("content with d tag")
+            .tags([Tag::identifier(identifier_with_d)])
+            .sign_with_keys(&keys)
+            .expect("sign long-form event with d tag");
+
+        let coordinate = Coordinate::new(Kind::LongFormTextNote, keys.public_key())
+            .identifier(identifier_with_a);
+        let event_with_a_only = EventBuilder::long_form_text_note("content with a tag only")
+            .tags([Tag::coordinate(coordinate)])
+            .sign_with_keys(&keys)
+            .expect("sign long-form event with coordinate tag");
+
+        ndb.process_event(&serde_json::to_string(&event_with_d).unwrap())
+            .expect("ingest event with d tag");
+        ndb.process_event(&serde_json::to_string(&event_with_a_only).unwrap())
+            .expect("ingest event with a tag");
+
+        let event_with_d_id = event_with_d.id.to_bytes();
+        let event_with_a_only_id = event_with_a_only.id.to_bytes();
+        wait_for_note(&ndb, &event_with_d_id);
+        wait_for_note(&ndb, &event_with_a_only_id);
+
+        {
+            let txn = Transaction::new(&ndb).expect("transaction for d-tag lookup");
+            let note = query_note_by_address(&ndb, &txn, &author, kind, identifier_with_d)
+                .expect("should find event by d tag");
+            assert_eq!(note.id(), &event_with_d_id);
+        }
+
+        {
+            let txn = Transaction::new(&ndb).expect("transaction for a-tag lookup");
+            let note = query_note_by_address(&ndb, &txn, &author, kind, identifier_with_a)
+                .expect("should find event via a-tag fallback");
+            assert_eq!(note.id(), &event_with_a_only_id);
+        }
+
+        drop(ndb);
+        let _ = fs::remove_dir_all(&db_dir);
+    }
 }
 
 pub fn render_note(ndb: &Notecrumbs, render_data: &RenderData) -> Vec<u8> {

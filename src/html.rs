@@ -1,7 +1,7 @@
 use crate::Error;
 use crate::{
     abbrev::{abbrev_str, abbreviate},
-    render::{is_image_url, NoteAndProfileRenderData, NoteRenderData, ProfileRenderData},
+    render::{is_image_url, NoteAndProfileRenderData, ProfileRenderData},
     Notecrumbs,
 };
 use ammonia::Builder as HtmlSanitizer;
@@ -188,7 +188,11 @@ pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
                 if is_image_url(raw) {
                     let src = html_escape::encode_double_quoted_attribute(raw);
                     let alt = html_escape::encode_double_quoted_attribute(raw);
-                    let _ = write!(body, r#"<img src="{}" alt="{}" />"#, src, alt);
+                    let _ = write!(
+                        body,
+                        r#"<img src="{}" alt="{}" style="max-width:100%;height:auto;display:block;margin:16px 0;" />"#,
+                        src, alt
+                    );
                 } else {
                     let href = html_escape::encode_double_quoted_attribute(raw);
                     let label = html_escape::encode_text(raw);

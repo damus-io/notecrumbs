@@ -23,6 +23,11 @@ const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
 
 pub enum NoteRenderData {
     Missing([u8; 32]),
+    Address {
+        author: [u8; 32],
+        kind: u64,
+        identifier: String,
+    },
     Note(NoteKey),
 }
 
@@ -30,6 +35,7 @@ impl NoteRenderData {
     pub fn needs_note(&self) -> bool {
         match self {
             NoteRenderData::Missing(_) => true,
+            NoteRenderData::Address { .. } => true,
             NoteRenderData::Note(_) => false,
         }
     }
@@ -41,6 +47,11 @@ impl NoteRenderData {
     ) -> std::result::Result<Note<'a>, nostrdb::Error> {
         match self {
             NoteRenderData::Missing(note_id) => ndb.get_note_by_id(txn, note_id),
+            NoteRenderData::Address {
+                author,
+                kind,
+                identifier,
+            } => query_note_by_address(ndb, txn, author, *kind, identifier),
             NoteRenderData::Note(note_key) => ndb.get_note_by_key(txn, *note_key),
         }
     }
@@ -151,6 +162,13 @@ fn renderdata_to_filter(render_data: &RenderData) -> Vec<nostrdb::Filter> {
         Some(NoteRenderData::Missing(note_id)) => {
             filters.push(nostrdb::Filter::new().ids([note_id]).limit(1).build());
         }
+        Some(NoteRenderData::Address {
+            author,
+            kind,
+            identifier,
+        }) => {
+            filters.push(build_address_filter(author, *kind, identifier.as_str()));
+        }
         None | Some(NoteRenderData::Note(_)) => {}
     }
 
@@ -236,6 +254,46 @@ fn convert_filter(ndb_filter: &nostrdb::Filter) -> nostr::types::Filter {
     }
 
     filter
+}
+
+fn coordinate_tag(author: &[u8; 32], kind: u64, identifier: &str) -> String {
+    let pk_hex = hex::encode(author);
+    format!("{}:{}:{}", kind, pk_hex, identifier)
+}
+
+fn build_address_filter(author: &[u8; 32], kind: u64, identifier: &str) -> nostrdb::Filter {
+    let author_ref: [&[u8; 32]; 1] = [author];
+    let mut filter = nostrdb::Filter::new().authors(author_ref).kinds([kind]);
+    if !identifier.is_empty() {
+        let ident = identifier.to_string();
+        filter = filter.tags(vec![ident], 'd');
+        filter = filter.tags(vec![coordinate_tag(author, kind, identifier)], 'a');
+    }
+    filter.limit(1).build()
+}
+
+fn query_note_by_address<'a>(
+    ndb: &Ndb,
+    txn: &'a Transaction,
+    author: &[u8; 32],
+    kind: u64,
+    identifier: &str,
+) -> std::result::Result<Note<'a>, nostrdb::Error> {
+    let mut results = ndb.query(txn, &[build_address_filter(author, kind, identifier)], 1)?;
+    if results.is_empty() && !identifier.is_empty() {
+        let coord_filter = nostrdb::Filter::new()
+            .authors([author])
+            .kinds([kind])
+            .tags(vec![coordinate_tag(author, kind, identifier)], 'a')
+            .limit(1)
+            .build();
+        results = ndb.query(txn, &[coord_filter], 1)?;
+    }
+    if let Some(result) = results.first() {
+        ndb.get_note_by_key(txn, result.note_key)
+    } else {
+        Err(nostrdb::Error::NotFound)
+    }
 }
 
 pub async fn find_note(
@@ -420,6 +478,40 @@ pub fn get_render_data(ndb: &Ndb, txn: &Transaction, nip19: &Nip19) -> Result<Re
                 NoteRenderData::Note(note_key)
             } else {
                 NoteRenderData::Missing(*evid.as_bytes())
+            };
+
+            Ok(RenderData::note(note_rd, profile_rd))
+        }
+
+        Nip19::Coordinate(coordinate) => {
+            let author = coordinate.public_key.serialize();
+            let kind: u64 = u16::from(coordinate.kind) as u64;
+            let identifier = coordinate.identifier.clone();
+
+            let note_rd = {
+                let filter = build_address_filter(&author, kind, identifier.as_str());
+                let note_key = ndb
+                    .query(txn, &[filter], 1)
+                    .ok()
+                    .and_then(|results| results.into_iter().next().map(|res| res.note_key));
+
+                if let Some(note_key) = note_key {
+                    NoteRenderData::Note(note_key)
+                } else {
+                    NoteRenderData::Address {
+                        author,
+                        kind,
+                        identifier: identifier.clone(),
+                    }
+                }
+            };
+
+            let profile_rd = {
+                if let Ok(profile_key) = ndb.get_profilekey_by_pubkey(txn, &author) {
+                    Some(ProfileRenderData::Profile(profile_key))
+                } else {
+                    Some(ProfileRenderData::Missing(author))
+                }
             };
 
             Ok(RenderData::note(note_rd, profile_rd))

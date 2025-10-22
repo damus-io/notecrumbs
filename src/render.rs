@@ -513,15 +513,25 @@ fn collect_relay_hints(event: &Event) -> Vec<RelayUrl> {
         if parts.is_empty() {
             continue;
         }
-        let kind = parts[0].as_str();
-        if !matches!(kind, "r" | "relay" | "relays") {
+        let tag_name = parts[0].as_str();
+        let candidate = if matches!(tag_name, "r" | "relay" | "relays") {
+            tag.content()
+        } else if event.kind == Kind::ContactList {
+            parts.get(2).map(|s| s.as_str())
+        } else {
+            None
+        };
+
+        let Some(url) = candidate else {
+            continue;
+        };
+        if url.is_empty() {
             continue;
         }
-        if let Some(url) = tag.content() {
-            match RelayUrl::parse(url) {
-                Ok(relay) => relays.push(relay),
-                Err(err) => warn!("ignoring invalid relay hint {}: {}", url, err),
-            }
+
+        match RelayUrl::parse(url) {
+            Ok(relay) => relays.push(relay),
+            Err(err) => warn!("ignoring invalid relay hint {}: {}", url, err),
         }
     }
     relays

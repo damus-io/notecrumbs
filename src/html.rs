@@ -194,7 +194,7 @@ pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
             }
 
             BlockType::Text => {
-                let text = html_escape::encode_text(block.as_str());
+                let text = html_escape::encode_text(block.as_str()).replace("\n", "<br/>");
                 let _ = write!(body, r"{}", text);
             }
 

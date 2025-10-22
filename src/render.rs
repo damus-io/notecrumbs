@@ -289,7 +289,7 @@ fn query_note_by_address<'a>(
         results = ndb.query(txn, &[coord_filter], 1)?;
     }
     if let Some(result) = results.first() {
-        ndb.get_note_by_key(txn, result.note_key)
+        Ok(result.note.clone())
     } else {
         Err(nostrdb::Error::NotFound)
     }

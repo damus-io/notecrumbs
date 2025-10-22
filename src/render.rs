@@ -1,3 +1,4 @@
+use crate::timeout;
 use crate::{abbrev::abbrev_str, error::Result, fonts, nip19, Error, Notecrumbs};
 use egui::epaint::Shadow;
 use egui::{
@@ -316,13 +317,13 @@ pub async fn find_note(
     }
 
     client
-        .connect_with_timeout(std::time::Duration::from_millis(800))
+        .connect_with_timeout(timeout::get_env_timeout())
         .await;
 
     debug!("finding note(s) with filters: {:?}", filters);
 
     let mut streamed_events = client
-        .stream_events(filters, Some(std::time::Duration::from_millis(2000)))
+        .stream_events(filters, Some(timeout::get_env_timeout()))
         .await?;
 
     let mut num_loops = 0;

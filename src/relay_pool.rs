@@ -5,7 +5,15 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RelayStats {
+    pub ensure_calls: u64,
+    pub relays_added: u64,
+    pub connect_successes: u64,
+    pub connect_failures: u64,
+}
 
 /// Persistent relay pool responsible for maintaining long-lived connections.
 #[derive(Clone)]
@@ -14,6 +22,7 @@ pub struct RelayPool {
     known_relays: Arc<Mutex<HashSet<String>>>,
     default_relays: Arc<[RelayUrl]>,
     connect_timeout: Duration,
+    stats: Arc<Mutex<RelayStats>>,
 }
 
 impl RelayPool {
@@ -40,6 +49,7 @@ impl RelayPool {
             known_relays: Arc::new(Mutex::new(HashSet::new())),
             default_relays: default_relays.clone(),
             connect_timeout,
+            stats: Arc::new(Mutex::new(RelayStats::default())),
         };
 
         pool.ensure_relays(pool.default_relays().iter().cloned())
@@ -58,6 +68,7 @@ impl RelayPool {
     {
         let mut new_relays = Vec::new();
         let mut had_new = false;
+        let mut relays_added = 0u64;
         {
             let mut guard = self.known_relays.lock().await;
             for relay in relays {
@@ -65,10 +76,13 @@ impl RelayPool {
                 if guard.insert(key) {
                     new_relays.push(relay);
                     had_new = true;
+                    relays_added += 1;
                 }
             }
         }
 
+        let mut connect_success = 0u64;
+        let mut connect_failure = 0u64;
         for relay in new_relays {
             debug!("adding relay {}", relay);
             self.client
@@ -77,11 +91,39 @@ impl RelayPool {
                 .map_err(|err| Error::Generic(format!("failed to add relay {relay}: {err}")))?;
             if let Err(err) = self.client.connect_relay(relay.clone()).await {
                 warn!("failed to connect relay {}: {}", relay, err);
+                connect_failure += 1;
+            } else {
+                connect_success += 1;
             }
         }
 
         if had_new {
             self.client.connect_with_timeout(self.connect_timeout).await;
+
+            let mut stats = self.stats.lock().await;
+            stats.ensure_calls += 1;
+            stats.relays_added += relays_added;
+            stats.connect_successes += connect_success;
+            stats.connect_failures += connect_failure;
+            let snapshot = *stats;
+            drop(stats);
+
+            let tracked = {
+                let guard = self.known_relays.lock().await;
+                guard.len()
+            };
+
+            info!(
+                total_relays = tracked,
+                ensure_calls = snapshot.ensure_calls,
+                relays_added = relays_added,
+                connect_successes = connect_success,
+                connect_failures = connect_failure,
+                "relay pool health update"
+            );
+        } else {
+            let mut stats = self.stats.lock().await;
+            stats.ensure_calls += 1;
         }
 
         Ok(())
@@ -102,5 +144,14 @@ impl RelayPool {
                 .stream_events_from(urls, filters, Some(timeout))
                 .await?)
         }
+    }
+
+    pub async fn relay_stats(&self) -> (RelayStats, usize) {
+        let stats = { *self.stats.lock().await };
+        let tracked = {
+            let guard = self.known_relays.lock().await;
+            guard.len()
+        };
+        (stats, tracked)
     }
 }

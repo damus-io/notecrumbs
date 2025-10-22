@@ -31,7 +31,6 @@ mod nip19;
 mod pfp;
 mod relay_pool;
 mod render;
-mod timeout;
 
 use crate::secp256k1::XOnlyPublicKey;
 use relay_pool::RelayPool;
@@ -41,7 +40,7 @@ type ImageCache = LruCache<XOnlyPublicKey, egui::TextureHandle>;
 #[derive(Clone)]
 pub struct Notecrumbs {
     pub ndb: Ndb,
-    keys: Keys,
+    _keys: Keys,
     relay_pool: Arc<RelayPool>,
     font_data: egui::FontData,
     _img_cache: Arc<ImageCache>,
@@ -246,7 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cfg = Config::new();
     let ndb = Ndb::new(".", &cfg).expect("ndb failed to open");
     let keys = Keys::generate();
-    let timeout = timeout::get_env_timeout();
+    let timeout = get_env_timeout();
     let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
         .install_recorder()
         .expect("install prometheus recorder");
@@ -266,14 +265,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let app = Notecrumbs {
         ndb,
-        keys,
+        _keys: keys,
         relay_pool,
-        font_data,
-        _img_cache: img_cache,
-        default_pfp,
-        background,
-        prometheus_handle,
         _timeout: timeout,
+        _img_cache: img_cache,
+        background,
+        font_data,
+        default_pfp,
+        prometheus_handle,
     };
 
     // We start a loop to continuously accept incoming connections

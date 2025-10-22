@@ -421,6 +421,32 @@ const LOCAL_TIME_SCRIPT: &str = r#"
         </script>
 "#;
 
+const COPY_NPUB_SCRIPT: &str = r#"
+        <script>
+          (function() {
+            'use strict';
+            var buttons = document.querySelectorAll('[data-copy-npub]');
+            if (!navigator.clipboard || buttons.length === 0) {
+              return;
+            }
+            Array.prototype.forEach.call(buttons, function(button) {
+              button.addEventListener('click', function(event) {
+                var value = event.currentTarget.getAttribute('data-copy-npub');
+                if (!value) {
+                  return;
+                }
+                navigator.clipboard.writeText(value).then(function() {
+                  event.currentTarget.textContent = 'Copied!';
+                  setTimeout(function() {
+                    event.currentTarget.textContent = 'Copy npub';
+                  }, 1500);
+                });
+              });
+            });
+          }());
+        </script>
+"#;
+
 pub fn serve_note_html(
     app: &Notecrumbs,
     nip19: &Nip19,
@@ -899,11 +925,15 @@ pub fn serve_profile_html(
         format!(
             r#"<div class="profile-section">
   <h4 class="section-heading">Recent notes</h4>
-  {}
+  <div class="note-container">
+    {notes}
+  </div>
 </div>"#,
-            recent_notes_markup
+            notes = recent_notes_markup
         )
     };
+
+    let page_scripts = format!("{}{}", LOCAL_TIME_SCRIPT, COPY_NPUB_SCRIPT);
 
     let _ = write!(
         data,
@@ -942,23 +972,26 @@ pub fn serve_profile_html(
                    </a>
                 </div>
                 <h3 class="page-heading">{page_heading}</h3>
-                  <div class="note profile-card">
-                    {banner}
-                    <div class="profile-header">
-                       <img src="{pfp}" class="note-author-avatar" />
-                       <div class="profile-author-meta">
-                         <div class="note-author-name">{author}</div>
-                         {username}
-                         {nip05}
-                         {lud16}
-                         {website}
-                       </div>
-                    </div>
-                    {about}
+                  <div class="note-container">
+                      <div class="note profile-card">
+                        {banner}
+                        <div class="profile-header">
+                           <img src="{pfp}" class="note-author-avatar" />
+                           <div class="profile-author-meta">
+                             <div class="note-author-name">{author}</div>
+                             {username}
+                             {nip05}
+                             {lud16}
+                             {website}
+                           </div>
+                        </div>
+                        {about}
+                      </div>
                   </div>
                   {recent_section}
                 </div>
                <div class="note-actions-footer">
+                 <button class="accent-button" data-copy-npub="{bech32}">Copy npub</button>
                  <a href="nostr:{bech32}" class="muted-link">Open with default Nostr client</a>
                </div>
             </main>
@@ -970,7 +1003,7 @@ pub fn serve_profile_html(
                   © Damus Nostr Inc.
                 </span>
             </footer>
-            {time_script}
+            {scripts}
         </body>
     </html>
     "#,
@@ -997,7 +1030,7 @@ pub fn serve_profile_html(
         recent_section = recent_section,
         page_heading = page_heading,
         bech32 = bech32,
-        time_script = LOCAL_TIME_SCRIPT,
+        scripts = page_scripts,
     );
 
     Ok(Response::builder()

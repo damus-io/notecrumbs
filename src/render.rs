@@ -19,6 +19,7 @@ use nostrdb::{
     ProfileRecord, Transaction,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::time::SystemTime;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, warn};
@@ -28,6 +29,7 @@ const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_IMAGE_WIDTH: f32 = 900.0;
 const MAX_IMAGE_HEIGHT: f32 = 260.0;
 pub const PROFILE_FEED_RECENT_LIMIT: usize = 12;
+pub const PROFILE_FEED_LOOKBACK_DAYS: u64 = 30;
 
 pub enum NoteRenderData {
     Missing([u8; 32]),
@@ -360,30 +362,38 @@ pub async fn fetch_profile_feed(
 
     let relay_targets = collect_profile_relays(relay_pool.clone(), ndb.clone(), pubkey).await?;
 
-    let author_ref = [&pubkey];
-    let feed_filter = convert_filter(
-        &nostrdb::Filter::new()
-            .authors(author_ref)
-            .kinds([1])
-            .limit(PROFILE_FEED_RECENT_LIMIT as u64)
-            .build(),
-    );
+    let relay_targets_arc = Arc::new(relay_targets);
 
-    let mut stream = relay_pool
-        .stream_events(
-            vec![feed_filter],
-            &relay_targets,
-            Duration::from_millis(2000),
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(60 * 60 * 24 * PROFILE_FEED_LOOKBACK_DAYS))
+        .and_then(|ts| ts.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|dur| dur.as_secs());
+
+    let mut fetched = stream_profile_feed_once(
+        relay_pool.clone(),
+        ndb.clone(),
+        relay_targets_arc.clone(),
+        pubkey,
+        cutoff,
+    )
+    .await?;
+
+    if fetched == 0 {
+        fetched = stream_profile_feed_once(
+            relay_pool.clone(),
+            ndb.clone(),
+            relay_targets_arc.clone(),
+            pubkey,
+            None,
         )
         .await?;
+    }
 
-    while let Some(event) = stream.next().await {
-        if let Err(err) = ensure_relay_hints(&relay_pool, &event).await {
-            warn!("failed to apply relay hints: {err}");
-        }
-        if let Err(err) = ndb.process_event(&event.as_json()) {
-            error!("error processing profile feed event: {err}");
-        }
+    if fetched == 0 {
+        warn!(
+            "no profile notes fetched for {} even after fallback",
+            hex::encode(pubkey)
+        );
     }
 
     Ok(())
@@ -606,6 +616,46 @@ async fn collect_profile_relays(
     }
 
     Ok(targets)
+}
+
+async fn stream_profile_feed_once(
+    relay_pool: Arc<RelayPool>,
+    ndb: Ndb,
+    relays: Arc<Vec<RelayUrl>>,
+    pubkey: [u8; 32],
+    since: Option<u64>,
+) -> Result<usize> {
+    use nostr_sdk::JsonUtil;
+
+    let author_ref = [&pubkey];
+    let mut filter_builder = nostrdb::Filter::new()
+        .authors(author_ref)
+        .kinds([1])
+        .limit(PROFILE_FEED_RECENT_LIMIT as u64);
+
+    if let Some(since) = since {
+        filter_builder = filter_builder.since(since);
+    }
+
+    let filter = convert_filter(&filter_builder.build());
+    let mut stream = relay_pool
+        .stream_events(vec![filter], &relays, Duration::from_millis(2000))
+        .await?;
+
+    let mut fetched = 0usize;
+
+    while let Some(event) = stream.next().await {
+        if let Err(err) = ensure_relay_hints(&relay_pool, &event).await {
+            warn!("failed to apply relay hints: {err}");
+        }
+        if let Err(err) = ndb.process_event(&event.as_json()) {
+            error!("error processing profile feed event: {err}");
+        } else {
+            fetched += 1;
+        }
+    }
+
+    Ok(fetched)
 }
 
 /// Attempt to locate the render data locally. Anything missing from

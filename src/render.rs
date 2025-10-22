@@ -27,8 +27,6 @@ const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_IMAGE_WIDTH: f32 = 900.0;
 const MAX_IMAGE_HEIGHT: f32 = 260.0;
-const SECONDS_PER_DAY: u64 = 60 * 60 * 24;
-pub const PROFILE_FEED_LOOKBACK_DAYS: u64 = 30;
 pub const PROFILE_FEED_RECENT_LIMIT: usize = 12;
 
 pub enum NoteRenderData {
@@ -362,20 +360,10 @@ pub async fn fetch_profile_feed(
 
     let filters = {
         let author_ref = [&pubkey];
-        let cutoff = std::time::SystemTime::now()
-            .checked_sub(Duration::from_secs(
-                SECONDS_PER_DAY * PROFILE_FEED_LOOKBACK_DAYS,
-            ))
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        let since = cutoff
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
 
         let feed_filter = nostrdb::Filter::new()
             .authors(author_ref)
             .kinds([1])
-            .since(since)
             .limit(PROFILE_FEED_RECENT_LIMIT as u64)
             .build();
         let relay_filter = nostrdb::Filter::new()
@@ -453,21 +441,29 @@ impl RenderData {
         };
 
         let wait_for = Duration::from_secs(1);
-        let mut loops = 0;
+        let mut consecutive_timeouts = 0;
 
         loop {
-            if loops == 2 {
+            if !self.needs_note() && !self.needs_profile() {
+                break;
+            }
+
+            if consecutive_timeouts >= 5 {
+                warn!("render completion timed out waiting for remaining data");
                 break;
             }
 
             let note_keys = match timeout(wait_for, stream.next()).await {
-                Ok(Some(note_keys)) => note_keys,
+                Ok(Some(note_keys)) => {
+                    consecutive_timeouts = 0;
+                    note_keys
+                }
                 Ok(None) => {
-                    // end of stream?
+                    // end of stream
                     break;
                 }
                 Err(_) => {
-                    loops += 1;
+                    consecutive_timeouts += 1;
                     continue;
                 }
             };
@@ -495,11 +491,9 @@ impl RenderData {
                 }
             }
 
-            if note_keys_len >= 2 {
+            if note_keys_len >= 2 && !self.needs_note() && !self.needs_profile() {
                 break;
             }
-
-            loops += 1;
         }
 
         match fetch_handle.await {

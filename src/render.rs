@@ -839,6 +839,126 @@ fn profile_ui(app: &Notecrumbs, ctx: &egui::Context, profile_rd: Option<&Profile
     });
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::nips::nip01::Coordinate;
+    use nostr::prelude::{EventBuilder, Keys, Tag};
+    use nostrdb::Config;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    fn temp_db_dir(prefix: &str) -> PathBuf {
+        let base = PathBuf::from("target/test-dbs");
+        let _ = fs::create_dir_all(&base);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let dir = base.join(format!("{}-{}", prefix, nanos));
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    fn wait_for_note(ndb: &Ndb, note_id: &[u8; 32]) {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            if let Ok(txn) = Transaction::new(ndb) {
+                if ndb.get_note_by_id(&txn, note_id).is_ok() {
+                    return;
+                }
+            }
+
+            if Instant::now() >= deadline {
+                panic!("timed out waiting for note ingestion");
+            }
+
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn build_address_filter_includes_only_d_tags() {
+        let author = [1u8; 32];
+        let identifier = "article-slug";
+        let kind = Kind::LongFormTextNote.as_u16() as u64;
+
+        let filter = build_address_filter(&author, kind, identifier);
+        let mut saw_d_tag = false;
+
+        for field in &filter {
+            if let FilterField::Tags(tag, elements) = field {
+                assert_eq!(tag, 'd', "unexpected tag '{}' in filter", tag);
+                let mut values: Vec<String> = Vec::new();
+                for element in elements {
+                    match element {
+                        FilterElement::Str(value) => values.push(value.to_owned()),
+                        other => panic!("unexpected tag element {:?}", other),
+                    }
+                }
+                assert_eq!(values, vec![identifier.to_owned()]);
+                saw_d_tag = true;
+            }
+        }
+
+        assert!(saw_d_tag, "expected filter to include a 'd' tag constraint");
+    }
+
+    #[test]
+    fn query_note_by_address_uses_d_and_a_tag_filters() {
+        let keys = Keys::generate();
+        let author = keys.public_key().to_bytes();
+        let kind = Kind::LongFormTextNote.as_u16() as u64;
+        let identifier_with_d = "with-d-tag";
+        let identifier_with_a = "only-a-tag";
+
+        let db_dir = temp_db_dir("address-filters");
+        let db_path = db_dir.to_string_lossy().to_string();
+        let cfg = Config::new().skip_validation(true);
+        let ndb = Ndb::new(&db_path, &cfg).expect("failed to open nostrdb");
+
+        let event_with_d = EventBuilder::long_form_text_note("content with d tag")
+            .tags([Tag::identifier(identifier_with_d)])
+            .sign_with_keys(&keys)
+            .expect("sign long-form event with d tag");
+
+        let coordinate = Coordinate::new(Kind::LongFormTextNote, keys.public_key())
+            .identifier(identifier_with_a);
+        let event_with_a_only = EventBuilder::long_form_text_note("content with a tag only")
+            .tags([Tag::coordinate(coordinate)])
+            .sign_with_keys(&keys)
+            .expect("sign long-form event with coordinate tag");
+
+        ndb.process_event(&serde_json::to_string(&event_with_d).unwrap())
+            .expect("ingest event with d tag");
+        ndb.process_event(&serde_json::to_string(&event_with_a_only).unwrap())
+            .expect("ingest event with a tag");
+
+        let event_with_d_id = event_with_d.id.to_bytes();
+        let event_with_a_only_id = event_with_a_only.id.to_bytes();
+        wait_for_note(&ndb, &event_with_d_id);
+        wait_for_note(&ndb, &event_with_a_only_id);
+
+        {
+            let txn = Transaction::new(&ndb).expect("transaction for d-tag lookup");
+            let note = query_note_by_address(&ndb, &txn, &author, kind, identifier_with_d)
+                .expect("should find event by d tag");
+            assert_eq!(note.id(), &event_with_d_id);
+        }
+
+        {
+            let txn = Transaction::new(&ndb).expect("transaction for a-tag lookup");
+            let note = query_note_by_address(&ndb, &txn, &author, kind, identifier_with_a)
+                .expect("should find event via a-tag fallback");
+            assert_eq!(note.id(), &event_with_a_only_id);
+        }
+
+        drop(ndb);
+        let _ = fs::remove_dir_all(&db_dir);
+    }
+}
+
 pub fn render_note(ndb: &Notecrumbs, render_data: &RenderData) -> Vec<u8> {
     use egui_skia::{rasterize, RasterizeOptions};
     use skia_safe::EncodedImageFormat;

@@ -27,6 +27,9 @@ const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_IMAGE_WIDTH: f32 = 900.0;
 const MAX_IMAGE_HEIGHT: f32 = 260.0;
+const SECONDS_PER_DAY: u64 = 60 * 60 * 24;
+pub const PROFILE_FEED_LOOKBACK_DAYS: u64 = 30;
+pub const PROFILE_FEED_RECENT_LIMIT: usize = 12;
 
 pub enum NoteRenderData {
     Missing([u8; 32]),
@@ -312,7 +315,7 @@ pub async fn find_note(
 
     let mut relay_targets = nip19::nip19_relays(nip19);
     if relay_targets.is_empty() {
-        relay_targets = relay_pool.default_relays();
+        relay_targets = relay_pool.default_relays().to_vec();
     }
 
     relay_pool.ensure_relays(relay_targets.clone()).await?;
@@ -354,13 +357,15 @@ pub async fn fetch_profile_feed(
     use nostr_sdk::JsonUtil;
 
     relay_pool
-        .ensure_relays(relay_pool.default_relays())
+        .ensure_relays(relay_pool.default_relays().iter().cloned())
         .await?;
 
     let filters = {
         let author_ref = [&pubkey];
         let cutoff = std::time::SystemTime::now()
-            .checked_sub(Duration::from_secs(60 * 60 * 24 * 30))
+            .checked_sub(Duration::from_secs(
+                SECONDS_PER_DAY * PROFILE_FEED_LOOKBACK_DAYS,
+            ))
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
         let since = cutoff
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -371,7 +376,7 @@ pub async fn fetch_profile_feed(
             .authors(author_ref)
             .kinds([1])
             .since(since)
-            .limit(40)
+            .limit(PROFILE_FEED_RECENT_LIMIT as u64)
             .build();
         vec![convert_filter(&feed_filter)]
     };
@@ -416,7 +421,7 @@ impl RenderData {
         relay_pool: Arc<RelayPool>,
         nip19: Nip19,
     ) -> Result<()> {
-        let mut stream = {
+        let (mut stream, fetch_handle) = {
             let filter = renderdata_to_filter(self);
             if filter.is_empty() {
                 // should really never happen unless someone broke
@@ -430,8 +435,8 @@ impl RenderData {
             let filters = filter.iter().map(convert_filter).collect();
             let ndb = ndb.clone();
             let pool = relay_pool.clone();
-            tokio::spawn(async move { find_note(pool, ndb, filters, &nip19).await });
-            stream
+            let handle = tokio::spawn(async move { find_note(pool, ndb, filters, &nip19).await });
+            (stream, handle)
         };
 
         let wait_for = Duration::from_secs(1);
@@ -479,7 +484,14 @@ impl RenderData {
             loops += 1;
         }
 
-        Ok(())
+        match fetch_handle.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(err),
+            Err(join_err) => Err(Error::Generic(format!(
+                "relay fetch task failed: {}",
+                join_err
+            ))),
+        }
     }
 }
 

@@ -1,7 +1,9 @@
 use crate::Error;
 use crate::{
     abbrev::{abbrev_str, abbreviate},
-    render::{is_image_url, NoteAndProfileRenderData, ProfileRenderData},
+    render::{
+        is_image_url, NoteAndProfileRenderData, ProfileRenderData, PROFILE_FEED_RECENT_LIMIT,
+    },
     Notecrumbs,
 };
 use ammonia::Builder as HtmlSanitizer;
@@ -426,8 +428,37 @@ const COPY_NPUB_SCRIPT: &str = r#"
           (function() {
             'use strict';
             var buttons = document.querySelectorAll('[data-copy-npub]');
-            if (!navigator.clipboard || buttons.length === 0) {
+            if (buttons.length === 0 || !document.body) {
               return;
+            }
+            function copyWithExecCommand(value) {
+              var textarea = document.createElement('textarea');
+              textarea.value = value;
+              textarea.setAttribute('readonly', '');
+              textarea.style.position = 'fixed';
+              textarea.style.top = '-9999px';
+              document.body.appendChild(textarea);
+              textarea.select();
+              var success = false;
+              try {
+                success = document.execCommand('copy');
+              } catch (err) {
+                success = false;
+              }
+              document.body.removeChild(textarea);
+              return success;
+            }
+            function copyText(value) {
+              if (navigator.clipboard && navigator.clipboard.writeText) {
+                return navigator.clipboard.writeText(value);
+              }
+              return new Promise(function(resolve, reject) {
+                if (copyWithExecCommand(value)) {
+                  resolve();
+                } else {
+                  reject(new Error('copy unsupported'));
+                }
+              });
             }
             Array.prototype.forEach.call(buttons, function(button) {
               button.addEventListener('click', function(event) {
@@ -435,12 +466,19 @@ const COPY_NPUB_SCRIPT: &str = r#"
                 if (!value) {
                   return;
                 }
-                navigator.clipboard.writeText(value).then(function() {
-                  event.currentTarget.textContent = 'Copied!';
-                  setTimeout(function() {
-                    event.currentTarget.textContent = 'Copy npub';
-                  }, 1500);
-                });
+                copyText(value)
+                  .then(function() {
+                    event.currentTarget.textContent = 'Copied!';
+                    setTimeout(function() {
+                      event.currentTarget.textContent = 'Copy npub';
+                    }, 1500);
+                  })
+                  .catch(function() {
+                    event.currentTarget.textContent = 'Copy failed';
+                    setTimeout(function() {
+                      event.currentTarget.textContent = 'Copy npub';
+                    }, 1500);
+                  });
               });
             });
           }());
@@ -803,10 +841,13 @@ pub fn serve_profile_html(
         let note_filter = nostrdb::Filter::new()
             .authors(author_ref)
             .kinds([1])
-            .limit(20)
+            .limit(PROFILE_FEED_RECENT_LIMIT as u64)
             .build();
 
-        if let Ok(results) = app.ndb.query(&txn, &[note_filter], 20) {
+        if let Ok(results) = app
+            .ndb
+            .query(&txn, &[note_filter], PROFILE_FEED_RECENT_LIMIT as i32)
+        {
             let mut entries = Vec::new();
 
             for res in results {
@@ -836,7 +877,7 @@ pub fn serve_profile_html(
             }
 
             entries.sort_by(|a, b| b.0.cmp(&a.0));
-            entries.truncate(6);
+            entries.truncate(PROFILE_FEED_RECENT_LIMIT);
 
             for (timestamp_value, note_body_html, note_link_attr) in entries {
                 let _ = write!(

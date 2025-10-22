@@ -18,7 +18,7 @@ use nostrdb::{
     Block, BlockType, Blocks, FilterElement, FilterField, Mention, Ndb, Note, NoteKey, ProfileKey,
     ProfileRecord, Transaction,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, warn};
@@ -358,28 +358,23 @@ pub async fn fetch_profile_feed(
 ) -> Result<()> {
     use nostr_sdk::JsonUtil;
 
-    relay_pool
-        .ensure_relays(relay_pool.default_relays().iter().cloned())
-        .await?;
+    let relay_targets = collect_profile_relays(relay_pool.clone(), ndb.clone(), pubkey).await?;
 
-    let filters = {
-        let author_ref = [&pubkey];
-
-        let feed_filter = nostrdb::Filter::new()
+    let author_ref = [&pubkey];
+    let feed_filter = convert_filter(
+        &nostrdb::Filter::new()
             .authors(author_ref)
             .kinds([1])
             .limit(PROFILE_FEED_RECENT_LIMIT as u64)
-            .build();
-        let relay_filter = nostrdb::Filter::new()
-            .authors(author_ref)
-            .kinds([Kind::RelayList.as_u16() as u64])
-            .limit(1)
-            .build();
-        vec![convert_filter(&feed_filter), convert_filter(&relay_filter)]
-    };
+            .build(),
+    );
 
     let mut stream = relay_pool
-        .stream_events(filters, &[], Duration::from_millis(2000))
+        .stream_events(
+            vec![feed_filter],
+            &relay_targets,
+            Duration::from_millis(2000),
+        )
         .await?;
 
     while let Some(event) = stream.next().await {
@@ -543,6 +538,74 @@ async fn ensure_relay_hints(relay_pool: &Arc<RelayPool>, event: &Event) -> Resul
         return Ok(());
     }
     relay_pool.ensure_relays(hints).await
+}
+
+async fn collect_profile_relays(
+    relay_pool: Arc<RelayPool>,
+    ndb: Ndb,
+    pubkey: [u8; 32],
+) -> Result<Vec<RelayUrl>> {
+    use nostr_sdk::JsonUtil;
+
+    relay_pool
+        .ensure_relays(relay_pool.default_relays().iter().cloned())
+        .await?;
+
+    let mut known: HashSet<String> = relay_pool
+        .default_relays()
+        .iter()
+        .map(|url| url.to_string())
+        .collect();
+    let mut targets = relay_pool.default_relays().to_vec();
+
+    let author_ref = [&pubkey];
+
+    let relay_filter = convert_filter(
+        &nostrdb::Filter::new()
+            .authors(author_ref)
+            .kinds([Kind::RelayList.as_u16() as u64])
+            .limit(1)
+            .build(),
+    );
+
+    let contact_filter = convert_filter(
+        &nostrdb::Filter::new()
+            .authors(author_ref)
+            .kinds([Kind::ContactList.as_u16() as u64])
+            .limit(1)
+            .build(),
+    );
+
+    for filter in [relay_filter, contact_filter] {
+        let mut stream = relay_pool
+            .stream_events(vec![filter.clone()], &[], Duration::from_millis(2000))
+            .await?;
+        while let Some(event) = stream.next().await {
+            if let Err(err) = ndb.process_event(&event.as_json()) {
+                error!("error processing relay discovery event: {err}");
+            }
+
+            let hints = collect_relay_hints(&event);
+            if hints.is_empty() {
+                continue;
+            }
+
+            let mut fresh = Vec::new();
+            for hint in hints {
+                let key = hint.to_string();
+                if known.insert(key) {
+                    targets.push(hint.clone());
+                    fresh.push(hint);
+                }
+            }
+
+            if !fresh.is_empty() {
+                relay_pool.ensure_relays(fresh).await?;
+            }
+        }
+    }
+
+    Ok(targets)
 }
 
 /// Attempt to locate the render data locally. Anything missing from

@@ -7,6 +7,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -45,6 +46,7 @@ pub struct Notecrumbs {
     _img_cache: Arc<ImageCache>,
     default_pfp: egui::ImageData,
     background: egui::ImageData,
+    prometheus_handle: PrometheusHandle,
 
     /// How long do we wait for remote note requests
     _timeout: Duration,
@@ -75,6 +77,14 @@ async fn serve(
     app: &Notecrumbs,
     r: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, Error> {
+    if r.uri().path() == "/metrics" {
+        let body = app.prometheus_handle.render();
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/plain; version=0.0.4")
+            .body(Full::new(Bytes::from(body)))?);
+    }
+
     let is_png = r.uri().path().ends_with(".png");
     let is_json = r.uri().path().ends_with(".json");
     let until = if is_png {
@@ -236,6 +246,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ndb = Ndb::new(".", &cfg).expect("ndb failed to open");
     let keys = Keys::generate();
     let timeout = get_env_timeout();
+    let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .expect("install prometheus recorder");
     let relay_pool = Arc::new(
         RelayPool::new(
             keys.clone(),
@@ -259,6 +272,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         background,
         font_data,
         default_pfp,
+        prometheus_handle,
     };
 
     // We start a loop to continuously accept incoming connections
@@ -291,6 +305,7 @@ fn spawn_relay_pool_metrics_logger(pool: Arc<RelayPool>) {
         loop {
             ticker.tick().await;
             let (stats, tracked) = pool.relay_stats().await;
+            metrics::gauge!("relay_pool_known_relays", tracked as f64);
             info!(
                 total_relays = tracked,
                 ensure_calls = stats.ensure_calls,

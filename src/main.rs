@@ -30,6 +30,7 @@ mod html;
 mod nip19;
 mod pfp;
 mod render;
+mod timeout;
 
 use crate::secp256k1::XOnlyPublicKey;
 
@@ -192,12 +193,6 @@ async fn serve(
     }
 }
 
-fn get_env_timeout() -> Duration {
-    let timeout_env = std::env::var("TIMEOUT_MS").unwrap_or("2000".to_string());
-    let timeout_ms: u64 = timeout_env.parse().unwrap_or(2000);
-    Duration::from_millis(timeout_ms)
-}
-
 fn get_gradient() -> egui::ColorImage {
     use egui::{Color32, ColorImage};
     //use egui::pos2;
@@ -251,7 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cfg = Config::new();
     let ndb = Ndb::new(".", &cfg).expect("ndb failed to open");
     let keys = Keys::generate();
-    let timeout = get_env_timeout();
+    let timeout = timeout::get_env_timeout();
     let img_cache = Arc::new(LruCache::new(std::num::NonZeroUsize::new(64).unwrap()));
     let default_pfp = egui::ImageData::Color(Arc::new(get_default_pfp()));
     let background = egui::ImageData::Color(Arc::new(get_gradient()));

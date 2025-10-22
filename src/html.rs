@@ -1,15 +1,18 @@
 use crate::Error;
 use crate::{
     abbrev::{abbrev_str, abbreviate},
-    render::{NoteAndProfileRenderData, NoteRenderData, ProfileRenderData},
+    render::{NoteAndProfileRenderData, ProfileRenderData},
     Notecrumbs,
 };
+use ammonia::Builder as HtmlSanitizer;
 use http_body_util::Full;
 use hyper::{body::Bytes, header, Request, Response, StatusCode};
 use nostr_sdk::prelude::{Nip19, ToBech32};
 use nostrdb::{BlockType, Blocks, Filter, Mention, Ndb, Note, Transaction};
+use pulldown_cmark::{html, Options, Parser};
+use std::fmt::Write as _;
 use std::io::Write;
-use tracing::{error, warn};
+use std::str::FromStr;
 
 fn blocktype_name(blocktype: &BlockType) -> &'static str {
     match blocktype {
@@ -22,27 +25,119 @@ fn blocktype_name(blocktype: &BlockType) -> &'static str {
     }
 }
 
+#[derive(Default)]
+struct ArticleMetadata {
+    title: Option<String>,
+    image: Option<String>,
+    summary: Option<String>,
+    published_at: Option<u64>,
+    topics: Vec<String>,
+}
+
+fn collapse_whitespace<S: AsRef<str>>(input: S) -> String {
+    let mut result = String::with_capacity(input.as_ref().len());
+    let mut last_space = false;
+    for ch in input.as_ref().chars() {
+        if ch.is_whitespace() {
+            if !last_space && !result.is_empty() {
+                result.push(' ');
+                last_space = true;
+            }
+        } else {
+            result.push(ch);
+            last_space = false;
+        }
+    }
+
+    result.trim().to_string()
+}
+
+fn extract_article_metadata(note: &Note) -> ArticleMetadata {
+    let mut meta = ArticleMetadata::default();
+
+    for tag in note.tags() {
+        let mut iter = tag.into_iter();
+        let Some(tag_kind) = iter.next().and_then(|nstr| nstr.variant().str()) else {
+            continue;
+        };
+
+        match tag_kind {
+            "title" => {
+                if let Some(value) = iter.next().and_then(|nstr| nstr.variant().str()) {
+                    meta.title = Some(value.to_owned());
+                }
+            }
+            "image" => {
+                if let Some(value) = iter.next().and_then(|nstr| nstr.variant().str()) {
+                    meta.image = Some(value.to_owned());
+                }
+            }
+            "summary" => {
+                if let Some(value) = iter.next().and_then(|nstr| nstr.variant().str()) {
+                    meta.summary = Some(value.to_owned());
+                }
+            }
+            "published_at" => {
+                if let Some(value) = iter.next().and_then(|nstr| nstr.variant().str()) {
+                    if let Ok(ts) = u64::from_str(value) {
+                        meta.published_at = Some(ts);
+                    }
+                }
+            }
+            "t" => {
+                for topic in iter {
+                    if let Some(value) = topic.variant().str() {
+                        if !value.is_empty()
+                            && !meta
+                                .topics
+                                .iter()
+                                .any(|existing| existing.eq_ignore_ascii_case(value))
+                        {
+                            meta.topics.push(value.to_owned());
+                        }
+                        if meta.topics.len() >= 10 {
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    meta
+}
+
+fn render_markdown(markdown: &str) -> String {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_FOOTNOTES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+
+    let parser = Parser::new_ext(markdown, options);
+    let mut html_buf = String::new();
+    html::push_html(&mut html_buf, parser);
+
+    HtmlSanitizer::default().clean(&html_buf).to_string()
+}
+
 pub fn serve_note_json(
     ndb: &Ndb,
     note_rd: &NoteAndProfileRenderData,
 ) -> Result<Response<Full<Bytes>>, Error> {
     let mut body: Vec<u8> = vec![];
 
-    let note_key = match note_rd.note_rd {
-        NoteRenderData::Note(note_key) => note_key,
-        NoteRenderData::Missing(note_id) => {
-            warn!("missing note_id {}", hex::encode(note_id));
-            return Err(Error::NotFound);
-        }
-    };
-
     let txn = Transaction::new(ndb)?;
 
-    let note = if let Ok(note) = ndb.get_note_by_key(&txn, note_key) {
-        note
-    } else {
-        // 404
-        return Err(Error::NotFound);
+    let note = match note_rd.note_rd.lookup(&txn, ndb) {
+        Ok(note) => note,
+        Err(_) => return Err(Error::NotFound),
+    };
+
+    let note_key = match note.key() {
+        Some(note_key) => note_key,
+        None => return Err(Error::NotFound),
     };
 
     write!(body, "{{\"note\":{},\"parsed_content\":[", &note.json()?)?;
@@ -141,6 +236,179 @@ pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
     }
 }
 
+fn build_note_content_html(
+    app: &Notecrumbs,
+    note: &Note,
+    txn: &Transaction,
+    author_display: &str,
+    pfp_url: &str,
+    timestamp_value: u64,
+) -> String {
+    let mut body_buf = Vec::new();
+    if let Some(blocks) = note
+        .key()
+        .and_then(|nk| app.ndb.get_blocks_by_key(txn, nk).ok())
+    {
+        render_note_content(&mut body_buf, note, &blocks);
+    } else {
+        let _ = write!(body_buf, "{}", html_escape::encode_text(note.content()));
+    }
+
+    let note_body = String::from_utf8(body_buf).unwrap_or_default();
+    let pfp_attr = html_escape::encode_double_quoted_attribute(pfp_url);
+    let timestamp_attr = timestamp_value.to_string();
+
+    format!(
+        r#"<div class="note">
+            <div class="note-header">
+               <img src="{pfp}" class="note-author-avatar" />
+               <div class="note-author-name">{author}</div>
+               <div class="note-header-separator">·</div>
+               <time class="note-timestamp" data-timestamp="{ts}" datetime="{ts}" title="{ts}">{ts}</time>
+            </div>
+            <div class="note-content">{body}</div>
+        </div>"#,
+        pfp = pfp_attr,
+        author = author_display,
+        ts = timestamp_attr,
+        body = note_body
+    )
+}
+
+fn build_article_content_html(
+    author_display: &str,
+    pfp_url: &str,
+    timestamp_value: u64,
+    article_title_html: &str,
+    hero_image: Option<&str>,
+    summary_html: Option<&str>,
+    article_body_html: &str,
+    topics: &[String],
+) -> String {
+    let pfp_attr = html_escape::encode_double_quoted_attribute(pfp_url);
+    let timestamp_attr = timestamp_value.to_string();
+
+    let hero_markup = hero_image
+        .filter(|url| !url.is_empty())
+        .map(|url| {
+            let url_attr = html_escape::encode_double_quoted_attribute(url);
+            format!(
+                r#"<img src="{url}" class="article-hero" alt="Article header image" />"#,
+                url = url_attr
+            )
+        })
+        .unwrap_or_default();
+
+    let summary_markup = summary_html
+        .map(|summary| format!(r#"<p class="article-summary">{}</p>"#, summary))
+        .unwrap_or_default();
+
+    let mut topics_markup = String::new();
+    if !topics.is_empty() {
+        topics_markup.push_str(r#"<div class="article-topics">"#);
+        for topic in topics {
+            if topic.is_empty() {
+                continue;
+            }
+            let topic_text = html_escape::encode_text(topic);
+            let _ = write!(
+                topics_markup,
+                r#"<span class="article-topic">#{}</span>"#,
+                topic_text
+            );
+        }
+        topics_markup.push_str("</div>");
+    }
+
+    format!(
+        r#"<div class="note article-note">
+            <div class="note-header">
+               <img src="{pfp}" class="note-author-avatar" />
+               <div class="note-author-name">{author}</div>
+               <div class="note-header-separator">·</div>
+               <time class="note-timestamp" data-timestamp="{ts}" datetime="{ts}" title="{ts}">{ts}</time>
+            </div>
+            <h1 class="article-title">{title}</h1>
+            {hero}
+            {summary}
+            {topics}
+            <div class="article-content">{body}</div>
+        </div>"#,
+        pfp = pfp_attr,
+        author = author_display,
+        ts = timestamp_attr,
+        title = article_title_html,
+        hero = hero_markup,
+        summary = summary_markup,
+        topics = topics_markup,
+        body = article_body_html
+    )
+}
+
+const LOCAL_TIME_SCRIPT: &str = r#"
+        <script>
+          (function() {
+            'use strict';
+            if (!('Intl' in window) || typeof Intl.DateTimeFormat !== 'function') {
+              return;
+            }
+            var nodes = document.querySelectorAll('[data-timestamp]');
+            var displayFormatter = new Intl.DateTimeFormat(undefined, {
+              hour: 'numeric',
+              minute: '2-digit',
+              timeZoneName: 'short'
+            });
+            var titleFormatter = new Intl.DateTimeFormat(undefined, {
+              year: 'numeric',
+              month: 'short',
+              day: 'numeric',
+              hour: 'numeric',
+              minute: '2-digit',
+              second: '2-digit',
+              timeZoneName: 'long'
+            });
+            var monthNames = [
+              'Jan.',
+              'Feb.',
+              'Mar.',
+              'Apr.',
+              'May',
+              'Jun.',
+              'Jul.',
+              'Aug.',
+              'Sep.',
+              'Oct.',
+              'Nov.',
+              'Dec.'
+            ];
+            Array.prototype.forEach.call(nodes, function(node) {
+              var raw = node.getAttribute('data-timestamp');
+              if (!raw) {
+                return;
+              }
+              var timestamp = Number(raw);
+              if (!isFinite(timestamp)) {
+                return;
+              }
+              var date = new Date(timestamp * 1000);
+              if (isNaN(date.getTime())) {
+                return;
+              }
+              var shortText = displayFormatter.format(date);
+              var month = monthNames[date.getMonth()] || '';
+              var day = String(date.getDate());
+              var formattedDate = month
+                ? month + ' ' + day + ', ' + date.getFullYear()
+                : day + ', ' + date.getFullYear();
+              var combined = formattedDate + ' · ' + shortText;
+              node.textContent = combined;
+              node.setAttribute('title', titleFormatter.format(date));
+              node.setAttribute('datetime', date.toISOString());
+            });
+          }());
+        </script>
+"#;
+
 pub fn serve_note_html(
     app: &Notecrumbs,
     nip19: &Nip19,
@@ -149,78 +417,164 @@ pub fn serve_note_html(
 ) -> Result<Response<Full<Bytes>>, Error> {
     let mut data = Vec::new();
 
-    // indices
-    //
-    // 0: name
-    // 1: abbreviated description
-    // 2: hostname
-    // 3: bech32 entity
-    // 5: formatted date
-    // 6: pfp url
-
-    let note_key = match note_rd.note_rd {
-        NoteRenderData::Note(note_key) => note_key,
-        NoteRenderData::Missing(note_id) => {
-            warn!("missing note_id {}", hex::encode(note_id));
-            return Err(Error::NotFound);
-        }
-    };
-
     let txn = Transaction::new(&app.ndb)?;
 
-    let note = if let Ok(note) = app.ndb.get_note_by_key(&txn, note_key) {
-        note
-    } else {
-        // 404
-        return Err(Error::NotFound);
+    let note = match note_rd.note_rd.lookup(&txn, &app.ndb) {
+        Ok(note) => note,
+        Err(_) => return Err(Error::NotFound),
     };
 
-    let profile = note_rd.profile_rd.as_ref().and_then(|profile_rd| {
-        match profile_rd {
-            // we probably wouldn't have it here, but we query just in case?
+    let profile_record = note_rd
+        .profile_rd
+        .as_ref()
+        .and_then(|profile_rd| match profile_rd {
             ProfileRenderData::Missing(pk) => app.ndb.get_profile_by_pubkey(&txn, pk).ok(),
             ProfileRenderData::Profile(key) => app.ndb.get_profile_by_key(&txn, *key).ok(),
-        }
-    });
+        });
+
+    let profile_data = profile_record
+        .as_ref()
+        .and_then(|record| record.record().profile());
+
+    let profile_name_raw = profile_data
+        .and_then(|profile| profile.name())
+        .unwrap_or("nostrich");
+    let profile_name_html = html_escape::encode_text(profile_name_raw).into_owned();
+
+    let default_pfp_url = "https://damus.io/img/no-profile.svg";
+    let pfp_url_raw = profile_data
+        .and_then(|profile| profile.picture())
+        .unwrap_or(default_pfp_url);
 
     let hostname = "https://damus.io";
-    let abbrev_content = html_escape::encode_text(abbreviate(note.content(), 64));
-    let profile = profile.and_then(|pr| pr.record().profile());
-    let default_pfp_url = "https://damus.io/img/no-profile.svg";
-    let pfp_url = profile.and_then(|p| p.picture()).unwrap_or(default_pfp_url);
-    let profile_name = {
-        let name = profile.and_then(|p| p.name()).unwrap_or("nostrich");
-        html_escape::encode_text(name)
-    };
     let bech32 = nip19.to_bech32().unwrap();
+    let canonical_url = format!("{}/{}", hostname, bech32);
+    let fallback_image_url = format!("{}/{}.png", hostname, bech32);
 
-    write!(
+    let mut display_title_raw = profile_name_raw.to_string();
+    let mut og_description_raw = collapse_whitespace(abbreviate(note.content(), 64));
+    let mut og_image_url_raw = fallback_image_url.clone();
+    let mut timestamp_value = note.created_at();
+    let mut page_heading = "Note";
+    let mut og_type = "website";
+    let author_display_html = profile_name_html.clone();
+
+    let main_content_html = if matches!(note.kind(), 30023 | 30024) {
+        page_heading = "Article";
+        og_type = "article";
+
+        let ArticleMetadata {
+            title,
+            image,
+            summary,
+            published_at,
+            topics,
+        } = extract_article_metadata(&note);
+
+        if let Some(title) = title
+            .as_deref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            display_title_raw = title.to_owned();
+        }
+
+        if let Some(published_at) = published_at {
+            timestamp_value = published_at;
+        }
+
+        let summary_source = summary
+            .as_deref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_owned())
+            .unwrap_or_else(|| abbreviate(note.content(), 240).to_string());
+
+        if let Some(ref image_url) = image {
+            if !image_url.trim().is_empty() {
+                og_image_url_raw = image_url.trim().to_owned();
+            }
+        }
+
+        og_description_raw = collapse_whitespace(&summary_source);
+
+        let article_title_html = html_escape::encode_text(&display_title_raw).into_owned();
+        let summary_display_html = if summary_source.is_empty() {
+            None
+        } else {
+            Some(html_escape::encode_text(&summary_source).into_owned())
+        };
+        let article_body_html = render_markdown(note.content());
+
+        build_article_content_html(
+            author_display_html.as_str(),
+            pfp_url_raw,
+            timestamp_value,
+            &article_title_html,
+            image.as_deref(),
+            summary_display_html.as_deref(),
+            &article_body_html,
+            &topics,
+        )
+    } else {
+        build_note_content_html(
+            app,
+            &note,
+            &txn,
+            author_display_html.as_str(),
+            pfp_url_raw,
+            timestamp_value,
+        )
+    };
+
+    if og_description_raw.is_empty() {
+        og_description_raw = display_title_raw.clone();
+    }
+
+    if og_image_url_raw.trim().is_empty() {
+        og_image_url_raw = fallback_image_url;
+    }
+
+    let page_title_text = format!("{} on nostr", display_title_raw);
+    let og_image_alt_text = format!("{}: {}", display_title_raw, og_description_raw);
+
+    let page_title_html = html_escape::encode_text(&page_title_text).into_owned();
+    let page_heading_html = html_escape::encode_text(page_heading).into_owned();
+    let og_description_attr =
+        html_escape::encode_double_quoted_attribute(&og_description_raw).into_owned();
+    let og_image_attr = html_escape::encode_double_quoted_attribute(&og_image_url_raw).into_owned();
+    let og_title_attr = html_escape::encode_double_quoted_attribute(&page_title_text).into_owned();
+    let og_image_alt_attr =
+        html_escape::encode_double_quoted_attribute(&og_image_alt_text).into_owned();
+    let canonical_url_attr =
+        html_escape::encode_double_quoted_attribute(&canonical_url).into_owned();
+
+    let _ = write!(
         data,
         r#"
         <html>
         <head>
-          <title>{0} on nostr</title>
+          <title>{page_title}</title>
           <link rel="stylesheet" href="https://damus.io/css/notecrumbs.css" type="text/css" />
           <meta name="viewport" content="width=device-width, initial-scale=1">
-          <meta name="apple-itunes-app" content="app-id=1628663131, app-argument=damus:nostr:{3}"/>
+          <meta name="apple-itunes-app" content="app-id=1628663131, app-argument=damus:nostr:{bech32}"/>
           <meta charset="UTF-8">
-
-          <meta property="og:description" content="{1}" />
-          <meta property="og:image" content="{2}/{3}.png"/>
-          <meta property="og:image:alt" content="{0}: {1}" />
+          <meta property="og:description" content="{og_description}" />
+          <meta property="og:image" content="{og_image}"/>
+          <meta property="og:image:alt" content="{og_image_alt}" />
           <meta property="og:image:height" content="600" />
           <meta property="og:image:width" content="1200" />
           <meta property="og:image:type" content="image/png" />
           <meta property="og:site_name" content="Damus" />
-          <meta property="og:title" content="{0} on nostr" />
-          <meta property="og:url" content="{2}/{3}"/>
-          <meta name="og:type" content="website"/>
-          <meta name="twitter:image:src" content="{2}/{3}.png" />
+          <meta property="og:title" content="{og_title}" />
+          <meta property="og:url" content="{canonical_url}"/>
+          <meta property="og:type" content="{og_type}"/>
+          <meta name="og:type" content="{og_type}"/>
+          <meta name="twitter:image:src" content="{og_image}" />
           <meta name="twitter:site" content="@damusapp" />
           <meta name="twitter:card" content="summary_large_image" />
-          <meta name="twitter:title" content="{0} on nostr" />
-          <meta name="twitter:description" content="{1}" />
-      
+          <meta name="twitter:title" content="{og_title}" />
+          <meta name="twitter:description" content="{og_description}" />
         </head>
         <body>
           <main>
@@ -229,54 +583,14 @@ pub fn serve_note_html(
                    <a href="https://damus.io" target="_blank">
                      <img src="https://damus.io/logo_icon.png" class="logo" />
                    </a>
-                   <!--
-                   <a href="damus:nostr:note1234..." id="top-menu-open-in-damus-button" class="accent-button">
-                     Open in Damus
-                   </a>
-                   -->
                 </div>
-                <h3 class="page-heading">Note</h3>
+                <h3 class="page-heading">{page_heading}</h3>
                   <div class="note-container">
-                      <div class="note">
-                        <div class="note-header">
-                           <img src="{5}" class="note-author-avatar" />
-                           <div class="note-author-name">{0}</div>
-                           <div class="note-header-separator">·</div>
-                           <div class="note-timestamp">{4}</div>
-                        </div>
-
-                          <div class="note-content">"#,
-        profile_name,
-        abbrev_content,
-        hostname,
-        bech32,
-        note.created_at(),
-        pfp_url,
-    )?;
-
-    let ok = (|| -> Result<(), nostrdb::Error> {
-        let note_id = note.id();
-        let note = app.ndb.get_note_by_id(&txn, note_id)?;
-        let blocks = app.ndb.get_blocks_by_key(&txn, note.key().unwrap())?;
-
-        render_note_content(&mut data, &note, &blocks);
-
-        Ok(())
-    })();
-
-    if let Err(err) = ok {
-        error!("error rendering html: {}", err);
-        let _ = write!(data, "{}", html_escape::encode_text(&note.content()));
-    }
-
-    let _ = write!(
-        data,
-        r#"
-                       </div>
-                   </div>
+                      {main_content}
+                  </div>
                 </div>
                <div class="note-actions-footer">
-                 <a href="nostr:{}" class="muted-link">Open with default Nostr client</a>
+                 <a href="nostr:{bech32}" class="muted-link">Open with default Nostr client</a>
                </div>
             </main>
             <footer>
@@ -287,10 +601,21 @@ pub fn serve_note_html(
                   © Damus Nostr Inc.
                 </span>
             </footer>
+        {script}
         </body>
     </html>
     "#,
-        bech32
+        page_title = page_title_html,
+        og_description = og_description_attr,
+        og_image = og_image_attr,
+        og_image_alt = og_image_alt_attr,
+        og_title = og_title_attr,
+        canonical_url = canonical_url_attr,
+        og_type = og_type,
+        page_heading = page_heading_html,
+        main_content = main_content_html,
+        bech32 = bech32,
+        script = LOCAL_TIME_SCRIPT,
     );
 
     Ok(Response::builder()

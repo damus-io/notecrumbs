@@ -10,6 +10,7 @@ pub fn nip19_relays(nip19: &Nip19) -> Vec<RelayUrl> {
             .iter()
             .filter_map(|r| RelayUrl::parse(r).ok())
             .collect(),
+        Nip19::Coordinate(coord) => coord.relays.clone(),
         Nip19::Profile(p) => p.relays.clone(),
         _ => vec![],
     }

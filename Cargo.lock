@@ -1919,7 +1919,6 @@ dependencies = [
  "hyper 1.7.0",
  "hyper-util",
  "image",
- "lru",
  "metrics 0.21.1",
  "metrics-exporter-prometheus",
  "nostr",

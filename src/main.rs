@@ -20,8 +20,6 @@ use nostr_sdk::prelude::*;
 use nostrdb::{Config, Ndb, NoteKey, Transaction};
 use std::time::Duration;
 
-use lru::LruCache;
-
 mod abbrev;
 mod error;
 mod fonts;
@@ -32,10 +30,7 @@ mod pfp;
 mod relay_pool;
 mod render;
 
-use crate::secp256k1::XOnlyPublicKey;
 use relay_pool::RelayPool;
-
-type ImageCache = LruCache<XOnlyPublicKey, egui::TextureHandle>;
 
 const FRONTEND_CSS: &str = include_str!("../assets/damus.css");
 const POETSEN_FONT: &[u8] = include_bytes!("../fonts/PoetsenOne-Regular.ttf");
@@ -48,7 +43,6 @@ pub struct Notecrumbs {
     _keys: Keys,
     relay_pool: Arc<RelayPool>,
     font_data: egui::FontData,
-    _img_cache: Arc<ImageCache>,
     default_pfp: egui::ImageData,
     background: egui::ImageData,
     prometheus_handle: PrometheusHandle,
@@ -297,7 +291,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .await?,
     );
     spawn_relay_pool_metrics_logger(relay_pool.clone());
-    let img_cache = Arc::new(LruCache::new(std::num::NonZeroUsize::new(64).unwrap()));
     let default_pfp = egui::ImageData::Color(Arc::new(get_default_pfp()));
     let background = egui::ImageData::Color(Arc::new(get_gradient()));
     let font_data = egui::FontData::from_static(include_bytes!("../fonts/NotoSans-Regular.ttf"));
@@ -307,7 +300,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         _keys: keys,
         relay_pool,
         _timeout: timeout,
-        _img_cache: img_cache,
         background,
         font_data,
         default_pfp,

@@ -8,7 +8,10 @@ use egui::{
     Color32, FontFamily, FontId, Mesh, Rect, RichText, Rounding, Shape, TextureHandle, Vec2,
     Visuals,
 };
-use nostr::event::kind::Kind;
+use nostr::event::{
+    kind::Kind,
+    tag::{TagKind, TagStandard},
+};
 use nostr::types::{RelayUrl, SingleLetterTag, Timestamp};
 use nostr_sdk::async_utility::futures_util::StreamExt;
 use nostr_sdk::nips::nip19::Nip19;
@@ -510,23 +513,28 @@ impl RenderData {
 
 fn collect_relay_hints(event: &Event) -> Vec<RelayUrl> {
     let mut relays = Vec::new();
-    for tag in event.tags.as_slice() {
-        let parts = tag.as_slice();
-        if parts.is_empty() {
-            continue;
-        }
-        let tag_name = parts[0].as_str();
-        let candidate = if matches!(tag_name, "r" | "relay" | "relays") {
-            tag.content()
-        } else if event.kind == Kind::ContactList {
-            parts.get(2).map(|s| s.as_str())
-        } else {
-            None
+    for tag in event.tags.iter() {
+        let candidate = match tag.kind() {
+            TagKind::Relay | TagKind::Relays => tag.content(),
+            TagKind::SingleLetter(letter) if letter.as_char() == 'r' => tag.content(),
+            _ if event.kind == Kind::ContactList => {
+                if let Some(TagStandard::PublicKey {
+                    relay_url: Some(url),
+                    ..
+                }) = tag.as_standardized()
+                {
+                    Some(url.as_str())
+                } else {
+                    tag.as_slice().get(2).map(|value| value.as_str())
+                }
+            }
+            _ => None,
         };
 
         let Some(url) = candidate else {
             continue;
         };
+
         if url.is_empty() {
             continue;
         }
@@ -581,32 +589,34 @@ async fn collect_profile_relays(
             .build(),
     );
 
-    for filter in [relay_filter, contact_filter] {
-        let mut stream = relay_pool
-            .stream_events(vec![filter.clone()], &[], Duration::from_millis(2000))
-            .await?;
-        while let Some(event) = stream.next().await {
-            if let Err(err) = ndb.process_event(&event.as_json()) {
-                error!("error processing relay discovery event: {err}");
-            }
+    let mut stream = relay_pool
+        .stream_events(
+            vec![relay_filter, contact_filter],
+            &[],
+            Duration::from_millis(2000),
+        )
+        .await?;
+    while let Some(event) = stream.next().await {
+        if let Err(err) = ndb.process_event(&event.as_json()) {
+            error!("error processing relay discovery event: {err}");
+        }
 
-            let hints = collect_relay_hints(&event);
-            if hints.is_empty() {
-                continue;
-            }
+        let hints = collect_relay_hints(&event);
+        if hints.is_empty() {
+            continue;
+        }
 
-            let mut fresh = Vec::new();
-            for hint in hints {
-                let key = hint.to_string();
-                if known.insert(key) {
-                    targets.push(hint.clone());
-                    fresh.push(hint);
-                }
+        let mut fresh = Vec::new();
+        for hint in hints {
+            let key = hint.to_string();
+            if known.insert(key) {
+                targets.push(hint.clone());
+                fresh.push(hint);
             }
+        }
 
-            if !fresh.is_empty() {
-                relay_pool.ensure_relays(fresh).await?;
-            }
+        if !fresh.is_empty() {
+            relay_pool.ensure_relays(fresh).await?;
         }
     }
 
@@ -723,7 +733,7 @@ pub fn get_render_data(ndb: &Ndb, txn: &Transaction, nip19: &Nip19) -> Result<Re
                     NoteRenderData::Address {
                         author,
                         kind,
-                        identifier: identifier.clone(),
+                        identifier,
                     }
                 }
             };
@@ -1067,10 +1077,10 @@ mod tests {
     use super::*;
     use nostr::nips::nip01::Coordinate;
     use nostr::prelude::{EventBuilder, Keys, Tag};
-    use nostrdb::Config;
+    use nostrdb::{Config, Filter};
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_db_dir(prefix: &str) -> PathBuf {
         let base = PathBuf::from("target/test-dbs");
@@ -1082,23 +1092,6 @@ mod tests {
         let dir = base.join(format!("{}-{}", prefix, nanos));
         let _ = fs::create_dir_all(&dir);
         dir
-    }
-
-    fn wait_for_note(ndb: &Ndb, note_id: &[u8; 32]) {
-        let deadline = Instant::now() + Duration::from_millis(500);
-        loop {
-            if let Ok(txn) = Transaction::new(ndb) {
-                if ndb.get_note_by_id(&txn, note_id).is_ok() {
-                    return;
-                }
-            }
-
-            if Instant::now() >= deadline {
-                panic!("timed out waiting for note ingestion");
-            }
-
-            std::thread::sleep(Duration::from_millis(10));
-        }
     }
 
     #[test]
@@ -1128,8 +1121,8 @@ mod tests {
         assert!(saw_d_tag, "expected filter to include a 'd' tag constraint");
     }
 
-    #[test]
-    fn query_note_by_address_uses_d_and_a_tag_filters() {
+    #[tokio::test]
+    async fn query_note_by_address_uses_d_and_a_tag_filters() {
         let keys = Keys::generate();
         let author = keys.public_key().to_bytes();
         let kind = Kind::LongFormTextNote.as_u16() as u64;
@@ -1153,15 +1146,22 @@ mod tests {
             .sign_with_keys(&keys)
             .expect("sign long-form event with coordinate tag");
 
+        let event_with_d_id = event_with_d.id.to_bytes();
+        let event_with_a_only_id = event_with_a_only.id.to_bytes();
         ndb.process_event(&serde_json::to_string(&event_with_d).unwrap())
             .expect("ingest event with d tag");
         ndb.process_event(&serde_json::to_string(&event_with_a_only).unwrap())
             .expect("ingest event with a tag");
 
-        let event_with_d_id = event_with_d.id.to_bytes();
-        let event_with_a_only_id = event_with_a_only.id.to_bytes();
-        wait_for_note(&ndb, &event_with_d_id);
-        wait_for_note(&ndb, &event_with_a_only_id);
+        let wait_filter = Filter::new().ids([&event_with_d_id]).build();
+        let wait_filter_2 = Filter::new().ids([&event_with_a_only_id]).build();
+        let subscription = ndb
+            .subscribe(&[wait_filter, wait_filter_2])
+            .expect("subscribe to ingestion markers");
+        let _ = ndb
+            .wait_for_notes(subscription, 2)
+            .await
+            .expect("wait for note ingestion to complete");
 
         {
             let txn = Transaction::new(&ndb).expect("transaction for d-tag lookup");

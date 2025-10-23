@@ -12,6 +12,7 @@ use nostr::event::{
     kind::Kind,
     tag::{TagKind, TagStandard},
 };
+use nostr::nips::nip01::Coordinate;
 use nostr::types::{RelayUrl, SingleLetterTag, Timestamp};
 use nostr_sdk::async_utility::futures_util::StreamExt;
 use nostr_sdk::nips::nip19::Nip19;
@@ -267,8 +268,12 @@ pub(crate) fn convert_filter(ndb_filter: &nostrdb::Filter) -> nostr::types::Filt
 }
 
 fn coordinate_tag(author: &[u8; 32], kind: u64, identifier: &str) -> String {
-    let pk_hex = hex::encode(author);
-    format!("{}:{}:{}", kind, pk_hex, identifier)
+    let Ok(public_key) = PublicKey::from_slice(author) else {
+        return String::new();
+    };
+    let nostr_kind = Kind::from_u16(kind as u16);
+    let coordinate = Coordinate::new(nostr_kind, public_key).identifier(identifier);
+    coordinate.to_string()
 }
 
 fn build_address_filter(author: &[u8; 32], kind: u64, identifier: &str) -> nostrdb::Filter {
@@ -1148,20 +1153,26 @@ mod tests {
 
         let event_with_d_id = event_with_d.id.to_bytes();
         let event_with_a_only_id = event_with_a_only.id.to_bytes();
+
+        let wait_filter = Filter::new()
+            .ids([&event_with_d_id, &event_with_a_only_id])
+            .limit(2)
+            .build();
+        let subscription = ndb
+            .subscribe(&[wait_filter])
+            .expect("subscribe for note ingestion");
+
         ndb.process_event(&serde_json::to_string(&event_with_d).unwrap())
             .expect("ingest event with d tag");
         ndb.process_event(&serde_json::to_string(&event_with_a_only).unwrap())
             .expect("ingest event with a tag");
 
-        let wait_filter = Filter::new().ids([&event_with_d_id]).build();
-        let wait_filter_2 = Filter::new().ids([&event_with_a_only_id]).build();
-        let subscription = ndb
-            .subscribe(&[wait_filter, wait_filter_2])
-            .expect("subscribe to ingestion markers");
         let _ = ndb
             .wait_for_notes(subscription, 2)
             .await
             .expect("wait for note ingestion to complete");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         {
             let txn = Transaction::new(&ndb).expect("transaction for d-tag lookup");

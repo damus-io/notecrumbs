@@ -425,6 +425,33 @@ impl RenderData {
         };
     }
 
+    fn hydrate_from_note_key(&mut self, ndb: &Ndb, note_key: NoteKey) -> Result<bool> {
+        let txn = Transaction::new(ndb)?;
+        let note = match ndb.get_note_by_key(&txn, note_key) {
+            Ok(note) => note,
+            Err(err) => {
+                debug!(?note_key, "note key not yet visible in transaction: {err}");
+                return Ok(false);
+            }
+        };
+
+        if note.kind() == 0 {
+            match ndb.get_profilekey_by_pubkey(&txn, note.pubkey()) {
+                Ok(profile_key) => self.set_profile_key(profile_key),
+                Err(err) => {
+                    debug!(
+                        pubkey = %hex::encode(note.pubkey()),
+                        "profile key not ready after note ingestion: {err}"
+                    );
+                }
+            }
+        } else {
+            self.set_note_key(note_key);
+        }
+
+        Ok(true)
+    }
+
     pub async fn complete(
         &mut self,
         ndb: Ndb,
@@ -479,23 +506,14 @@ impl RenderData {
 
             let note_keys_len = note_keys.len();
 
-            {
-                let txn = Transaction::new(&ndb)?;
-
-                for note_key in note_keys {
-                    let note = if let Ok(note) = ndb.get_note_by_key(&txn, note_key) {
-                        note
-                    } else {
-                        error!("race condition in RenderData::complete?");
-                        continue;
-                    };
-
-                    if note.kind() == 0 {
-                        if let Ok(profile_key) = ndb.get_profilekey_by_pubkey(&txn, note.pubkey()) {
-                            self.set_profile_key(profile_key);
-                        }
-                    } else {
-                        self.set_note_key(note_key);
+            for note_key in note_keys {
+                match self.hydrate_from_note_key(&ndb, note_key) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // keep waiting; the outer loop will retry on the next batch
+                    }
+                    Err(err) => {
+                        error!(?note_key, "failed to hydrate note from key: {err}");
                     }
                 }
             }

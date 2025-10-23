@@ -159,7 +159,10 @@ async fn serve(
             .complete(app.ndb.clone(), app.relay_pool.clone(), nip19.clone())
             .await
         {
-            error!("Error fetching completion data: {err}");
+            error!(
+                nip19 = ?nip19,
+                "failed to fetch completion data: {err}"
+            );
         }
     }
 
@@ -188,7 +191,10 @@ async fn serve(
             if let Err(err) =
                 render::fetch_profile_feed(app.relay_pool.clone(), app.ndb.clone(), pubkey).await
             {
-                error!("Error fetching profile feed: {err}");
+                error!(
+                    profile = %hex::encode(pubkey),
+                    "failed to fetch profile feed: {err}"
+                );
             }
         }
     }

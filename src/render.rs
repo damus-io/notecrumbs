@@ -345,7 +345,12 @@ pub async fn find_note(
 
         debug!("processing event {:?}", event);
         if let Err(err) = ndb.process_event(&event.as_json()) {
-            error!("error processing event: {err}");
+            error!(
+                nip19 = ?nip19,
+                event_id = %event.id,
+                event_kind = ?event.kind,
+                "failed to process streamed event: {err}"
+            );
         }
 
         num_loops += 1;
@@ -621,7 +626,12 @@ async fn collect_profile_relays(
         .await?;
     while let Some(event) = stream.next().await {
         if let Err(err) = ndb.process_event(&event.as_json()) {
-            error!("error processing relay discovery event: {err}");
+            error!(
+                event_id = %event.id,
+                event_kind = ?event.kind,
+                author = %event.pubkey,
+                "failed to process relay discovery event: {err}"
+            );
         }
 
         let hints = collect_relay_hints(&event);

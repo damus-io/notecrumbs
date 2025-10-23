@@ -25,7 +25,7 @@ use nostrdb::{
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use tracing::{debug, error, warn};
 
 const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
@@ -379,7 +379,7 @@ pub async fn fetch_profile_feed(
         .and_then(|ts| ts.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|dur| dur.as_secs());
 
-    let mut fetched = stream_profile_feed_once(
+    let (mut fetched, mut ingested_ids) = stream_profile_feed_once(
         relay_pool.clone(),
         ndb.clone(),
         relay_targets_arc.clone(),
@@ -389,7 +389,7 @@ pub async fn fetch_profile_feed(
     .await?;
 
     if fetched == 0 {
-        fetched = stream_profile_feed_once(
+        let (fallback_fetched, mut fallback_ids) = stream_profile_feed_once(
             relay_pool.clone(),
             ndb.clone(),
             relay_targets_arc.clone(),
@@ -397,6 +397,12 @@ pub async fn fetch_profile_feed(
             None,
         )
         .await?;
+        fetched = fallback_fetched;
+        ingested_ids.append(&mut fallback_ids);
+    }
+
+    if !ingested_ids.is_empty() {
+        wait_for_profile_feed_ingestion(&ndb, &ingested_ids).await?;
     }
 
     if fetched == 0 {
@@ -662,7 +668,7 @@ async fn stream_profile_feed_once(
     relays: Arc<Vec<RelayUrl>>,
     pubkey: [u8; 32],
     since: Option<u64>,
-) -> Result<usize> {
+) -> Result<(usize, Vec<[u8; 32]>)> {
     let filter = {
         let author_ref = [&pubkey];
         let mut builder = nostrdb::Filter::new()
@@ -681,19 +687,64 @@ async fn stream_profile_feed_once(
         .await?;
 
     let mut fetched = 0usize;
+    let mut ingested = Vec::new();
 
     while let Some(event) = stream.next().await {
         if let Err(err) = ensure_relay_hints(&relay_pool, &event).await {
             warn!("failed to apply relay hints: {err}");
         }
         if let Err(err) = ndb.process_event(&event.as_json()) {
-            error!("error processing profile feed event: {err}");
+            error!(
+                profile = %hex::encode(pubkey),
+                event_id = %event.id,
+                event_kind = ?event.kind,
+                "failed to process profile feed event: {err}"
+            );
         } else {
             fetched += 1;
+            ingested.push(event.id.to_bytes());
         }
     }
 
-    Ok(fetched)
+    Ok((fetched, ingested))
+}
+
+async fn wait_for_profile_feed_ingestion(ndb: &Ndb, note_ids: &[[u8; 32]]) -> Result<()> {
+    if note_ids.is_empty() {
+        return Ok(());
+    }
+
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut attempt = 0;
+
+    loop {
+        let missing: Vec<[u8; 32]> = {
+            let txn = Transaction::new(ndb)?;
+            note_ids
+                .iter()
+                .filter_map(|id| match ndb.get_note_by_id(&txn, id) {
+                    Ok(_) => None,
+                    Err(_) => Some(*id),
+                })
+                .collect()
+        };
+
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        attempt += 1;
+        if attempt > MAX_ATTEMPTS {
+            warn!(
+                missing = missing.len(),
+                "profile feed notes still missing after wait; rendering may be incomplete"
+            );
+            return Ok(());
+        }
+
+        let backoff_ms = 25 * (attempt as u64);
+        sleep(Duration::from_millis(backoff_ms)).await;
+    }
 }
 
 /// Attempt to locate the render data locally. Anything missing from

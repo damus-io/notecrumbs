@@ -1,0 +1,458 @@
+@font-face {
+  font-family: "PoetsenOne";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/PoetsenOne-Regular.ttf") format("truetype");
+}
+
+:root {
+  color-scheme: dark;
+  --damus-bg: #060114;
+  --damus-gradient: radial-gradient(circle at 18% 20%, rgba(248, 79, 255, 0.28) 0%, rgba(34, 5, 66, 0.82) 45%, rgba(6, 1, 20, 0.96) 100%);
+  --damus-card-bg: rgba(22, 10, 38, 0.82);
+  --damus-card-border: rgba(255, 255, 255, 0.08);
+  --damus-text: #f5f2ff;
+  --damus-muted: rgba(226, 215, 255, 0.72);
+  --damus-accent: #bd66ff;
+  --damus-accent-strong: #ff59d5;
+  --damus-highlight: rgba(189, 102, 255, 0.16);
+  --damus-font: "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: var(--damus-font);
+  background: var(--damus-gradient), var(--damus-bg);
+  background-attachment: fixed;
+  color: var(--damus-text);
+  line-height: 1.6;
+  letter-spacing: -0.01em;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  margin: 0;
+  font-weight: 600;
+  color: #ffffff;
+  letter-spacing: -0.02em;
+}
+
+p {
+  margin: 0 0 1.1em;
+}
+
+p:last-child {
+  margin-bottom: 0;
+}
+
+a {
+  color: var(--damus-accent);
+  text-decoration: none;
+  transition: color 160ms ease;
+}
+
+a:hover {
+  color: var(--damus-accent-strong);
+  text-decoration: underline;
+}
+
+.damus-app {
+  width: min(960px, 100%);
+  margin: 0 auto;
+  padding: 48px 16px 72px;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+@media (min-width: 768px) {
+  .damus-app {
+    padding: 64px 32px 96px;
+  }
+}
+
+.damus-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.damus-logo-link {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.damus-logo-image {
+  width: clamp(36px, 7vw, 48px);
+  height: clamp(36px, 7vw, 48px);
+  border-radius: 12px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+}
+
+.damus-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.damus-link {
+  color: var(--damus-muted);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.damus-link:hover {
+  color: #ffffff;
+}
+
+.damus-cta {
+  background: linear-gradient(135deg, var(--damus-accent), var(--damus-accent-strong));
+  color: #090118;
+  border-radius: 999px;
+  padding: 0.55rem 1.35rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  box-shadow: 0 12px 34px rgba(189, 102, 255, 0.35);
+  transition: transform 160ms ease, box-shadow 160ms ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.damus-cta:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 18px 44px rgba(189, 102, 255, 0.45);
+  text-decoration: none;
+}
+
+
+.damus-main {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.damus-supporting {
+  font-size: clamp(1rem, 2.2vw, 1.2rem);
+  color: var(--damus-muted);
+  max-width: 720px;
+}
+
+.damus-card {
+  background: var(--damus-card-bg);
+  border: 1px solid var(--damus-card-border);
+  border-radius: 28px;
+  padding: clamp(1.75rem, 3vw, 2.5rem);
+  box-shadow: 0 25px 60px rgba(5, 0, 21, 0.5);
+  backdrop-filter: blur(24px);
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+}
+
+.damus-section {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.damus-section-title {
+  font-size: clamp(1.3rem, 3vw, 1.75rem);
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.damus-profile-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  font-size: 0.95rem;
+  color: var(--damus-muted);
+}
+
+.damus-profile-meta-row {
+  display: flex;
+  gap: 0.65rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.damus-meta-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: rgba(189, 102, 255, 0.18);
+  color: var(--damus-accent-strong);
+}
+
+.damus-meta-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.damus-profile-meta-row a {
+  color: inherit;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.damus-profile-meta-row a:hover {
+  color: #ffffff;
+  text-decoration: underline;
+}
+
+.damus-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.damus-note-header,
+.damus-profile-header {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.damus-note-avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 24px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.damus-note-author {
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: #ffffff;
+}
+
+.damus-note-time {
+  font-size: 0.9rem;
+  color: var(--damus-muted);
+  display: block;
+  margin-top: 4px;
+}
+
+.damus-note-body {
+  font-size: 1.05rem;
+  line-height: 1.7;
+}
+
+.damus-note-body img {
+  max-width: 100%;
+  border-radius: 20px;
+  margin: 1.25rem 0;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+
+.damus-note-body ul,
+.damus-note-body ol {
+  padding-left: 1.25rem;
+  margin: 0 0 1.1em;
+}
+
+.damus-note-body blockquote {
+  margin: 0 0 1.1em;
+  padding-left: 1rem;
+  border-left: 2px solid rgba(255, 255, 255, 0.25);
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.damus-note-body code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0.2rem 0.45rem;
+  border-radius: 8px;
+  font-family: "JetBrains Mono", "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9rem;
+}
+
+.damus-note-body pre {
+  background: rgba(0, 0, 0, 0.35);
+  padding: 1rem;
+  border-radius: 16px;
+  margin: 1.25rem 0;
+  overflow-x: auto;
+}
+
+.damus-article-title {
+  font-family: "PoetsenOne", var(--damus-font);
+  font-size: clamp(2rem, 4vw, 3rem);
+  margin: 0;
+}
+
+.damus-article-hero {
+  max-width: 100%;
+  border-radius: 28px;
+  box-shadow: 0 24px 45px rgba(0, 0, 0, 0.35);
+}
+
+.damus-article-summary {
+  font-size: 1.1rem;
+  color: var(--damus-muted);
+  margin: 0;
+}
+
+.damus-article-topics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.damus-article-topic {
+  background: rgba(189, 102, 255, 0.12);
+  color: #ffffff;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.damus-profile-card {
+  gap: 1.5rem;
+}
+
+.damus-profile-names {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.damus-profile-handle {
+  font-size: 1rem;
+  color: var(--damus-muted);
+}
+
+.damus-profile-about {
+  font-size: 1.05rem;
+  line-height: 1.7;
+  color: var(--damus-muted);
+  white-space: pre-wrap;
+}
+
+.damus-relays {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.damus-relays summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #ffffff;
+  list-style: none;
+}
+
+.damus-relays summary::-webkit-details-marker {
+  display: none;
+}
+
+.damus-relay-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.9rem;
+  color: var(--damus-muted);
+}
+
+.damus-relay-role {
+  margin-left: 0.35rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.damus-footer {
+  color: var(--damus-muted);
+  font-size: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: center;
+  justify-content: center;
+  align-items: center;
+}
+
+.damus-footer a {
+  color: inherit;
+}
+
+.damus-footer a:hover {
+  color: #ffffff;
+}
+
+.muted-link {
+  color: var(--damus-muted);
+}
+
+.muted-link:hover {
+  color: #ffffff;
+}
+
+.muted {
+  color: var(--damus-muted);
+}
+
+@media (max-width: 640px) {
+  .damus-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .damus-header-actions {
+    width: 100%;
+    align-items: flex-start;
+  }
+
+  .damus-cta {
+    width: 100%;
+  }
+
+  .damus-card {
+    border-radius: 22px;
+    padding: 1.5rem;
+  }
+
+  .damus-note-avatar {
+    width: 56px;
+    height: 56px;
+  }
+}

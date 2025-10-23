@@ -37,6 +37,11 @@ use relay_pool::RelayPool;
 
 type ImageCache = LruCache<XOnlyPublicKey, egui::TextureHandle>;
 
+const FRONTEND_CSS: &str = include_str!("../assets/damus.css");
+const POETSEN_FONT: &[u8] = include_bytes!("../fonts/PoetsenOne-Regular.ttf");
+const DEFAULT_PFP_IMAGE: &[u8] = include_bytes!("../assets/default_pfp.jpg");
+const DAMUS_LOGO_ICON: &[u8] = include_bytes!("../assets/logo_icon.png");
+
 #[derive(Clone)]
 pub struct Notecrumbs {
     pub ndb: Ndb,
@@ -83,6 +88,40 @@ async fn serve(
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/plain; version=0.0.4")
             .body(Full::new(Bytes::from(body)))?);
+    }
+
+    match r.uri().path() {
+        "/damus.css" => {
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/css; charset=utf-8")
+                .body(Full::new(Bytes::from_static(FRONTEND_CSS.as_bytes())))?);
+        }
+        "/fonts/PoetsenOne-Regular.ttf" => {
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "font/ttf")
+                .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
+                .body(Full::new(Bytes::from_static(POETSEN_FONT)))?);
+        }
+        "/assets/default_pfp.jpg" => {
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "image/jpeg")
+                .header(header::CACHE_CONTROL, "public, max-age=604800")
+                .body(Full::new(Bytes::from_static(DEFAULT_PFP_IMAGE)))?);
+        }
+        "/assets/logo_icon.png" => {
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "image/png")
+                .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
+                .body(Full::new(Bytes::from_static(DAMUS_LOGO_ICON)))?);
+        }
+        "/" => {
+            return html::serve_homepage(r);
+        }
+        _ => {}
     }
 
     let is_png = r.uri().path().ends_with(".png");

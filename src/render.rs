@@ -195,7 +195,7 @@ fn renderdata_to_filter(render_data: &RenderData) -> Vec<nostrdb::Filter> {
     filters
 }
 
-fn convert_filter(ndb_filter: &nostrdb::Filter) -> nostr::types::Filter {
+pub(crate) fn convert_filter(ndb_filter: &nostrdb::Filter) -> nostr::types::Filter {
     let mut filter = nostr::types::Filter::new();
 
     for element in ndb_filter {

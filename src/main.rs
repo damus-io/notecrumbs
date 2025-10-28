@@ -7,6 +7,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use metrics_exporter_prometheus::PrometheusHandle;
 use std::io::Write;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -29,21 +30,24 @@ mod gradient;
 mod html;
 mod nip19;
 mod pfp;
+mod relay_pool;
 mod render;
 mod timeout;
 
 use crate::secp256k1::XOnlyPublicKey;
+use relay_pool::RelayPool;
 
 type ImageCache = LruCache<XOnlyPublicKey, egui::TextureHandle>;
 
 #[derive(Clone)]
 pub struct Notecrumbs {
     pub ndb: Ndb,
-    keys: Keys,
     font_data: egui::FontData,
     _img_cache: Arc<ImageCache>,
     default_pfp: egui::ImageData,
     background: egui::ImageData,
+    relay_pool: Arc<RelayPool>,
+    prometheus_handle: PrometheusHandle,
 
     /// How long do we wait for remote note requests
     _timeout: Duration,
@@ -62,6 +66,25 @@ pub fn floor_char_boundary(s: &str, index: usize) -> usize {
         // SAFETY: we know that the character boundary will be within four bytes
         unsafe { lower_bound + new_index.unwrap_unchecked() }
     }
+}
+
+fn spawn_relay_pool_metrics_logger(pool: Arc<RelayPool>) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            ticker.tick().await;
+            let (stats, tracked) = pool.relay_stats().await;
+            metrics::gauge!("relay_pool_known_relays", tracked as f64);
+            info!(
+                total_relays = tracked,
+                ensure_calls = stats.ensure_calls,
+                relays_added = stats.relays_added,
+                connect_successes = stats.connect_successes,
+                connect_failures = stats.connect_failures,
+                "relay pool metrics snapshot"
+            );
+        }
+    });
 }
 
 #[inline]
@@ -122,6 +145,14 @@ async fn serve(
     app: &Notecrumbs,
     r: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, Error> {
+    if r.uri().path() == "/metrics" {
+        let body = app.prometheus_handle.render();
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/plain; version=0.0.4")
+            .body(Full::new(Bytes::from(body)))?);
+    }
+
     let is_png = r.uri().path().ends_with(".png");
     let is_json = r.uri().path().ends_with(".json");
     let until = if is_png {
@@ -160,7 +191,7 @@ async fn serve(
     // fetch extra data if we are missing it
     if !render_data.is_complete() {
         if let Err(err) = render_data
-            .complete(app.ndb.clone(), app.keys.clone(), nip19.clone())
+            .complete(app.ndb.clone(), app.relay_pool.clone(), nip19.clone())
             .await
         {
             error!("Error fetching completion data: {err}");
@@ -247,6 +278,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ndb = Ndb::new(".", &cfg).expect("ndb failed to open");
     let keys = Keys::generate();
     let timeout = timeout::get_env_timeout();
+    let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .expect("install prometheus recorder");
+    let relay_pool = Arc::new(
+        RelayPool::new(
+            keys.clone(),
+            &["wss://relay.damus.io", "wss://nostr.wine", "wss://nos.lol"],
+            timeout,
+        )
+        .await?,
+    );
+    spawn_relay_pool_metrics_logger(relay_pool.clone());
     let img_cache = Arc::new(LruCache::new(std::num::NonZeroUsize::new(64).unwrap()));
     let default_pfp = egui::ImageData::Color(Arc::new(get_default_pfp()));
     let background = egui::ImageData::Color(Arc::new(get_gradient()));
@@ -254,12 +297,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let app = Notecrumbs {
         ndb,
-        keys,
         _timeout: timeout,
         _img_cache: img_cache,
         background,
         font_data,
         default_pfp,
+        relay_pool,
+        prometheus_handle,
     };
 
     // We start a loop to continuously accept incoming connections

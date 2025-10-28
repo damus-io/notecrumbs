@@ -1,3 +1,4 @@
+use crate::relay_pool::RelayPool;
 use crate::timeout;
 use crate::{abbrev::abbrev_str, error::Result, fonts, nip19, Error, Notecrumbs};
 use egui::epaint::Shadow;
@@ -11,12 +12,13 @@ use nostr::event::kind::Kind;
 use nostr::types::{SingleLetterTag, Timestamp};
 use nostr_sdk::async_utility::futures_util::StreamExt;
 use nostr_sdk::nips::nip19::Nip19;
-use nostr_sdk::prelude::{Client, EventId, Keys, PublicKey};
+use nostr_sdk::prelude::{EventId, PublicKey};
 use nostrdb::{
     Block, BlockType, Blocks, FilterElement, FilterField, Mention, Ndb, Note, NoteKey, ProfileKey,
     ProfileRecord, Transaction,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, warn};
 
@@ -297,33 +299,30 @@ fn query_note_by_address<'a>(
 }
 
 pub async fn find_note(
+    relay_pool: Arc<RelayPool>,
     ndb: Ndb,
-    keys: Keys,
     filters: Vec<nostr::Filter>,
     nip19: &Nip19,
 ) -> Result<()> {
     use nostr_sdk::JsonUtil;
 
-    let client = Client::builder().signer(keys).build();
-
-    let _ = client.add_relay("wss://relay.damus.io").await;
-    let _ = client.add_relay("wss://nostr.wine").await;
-    let _ = client.add_relay("wss://nos.lol").await;
     let expected_events = filters.len();
 
-    let other_relays = nip19::nip19_relays(nip19);
-    for relay in other_relays {
-        let _ = client.add_relay(relay).await;
+    let mut relay_targets = nip19::nip19_relays(nip19);
+    if relay_targets.is_empty() {
+        relay_targets = relay_pool.default_relays().iter().cloned().collect();
     }
 
-    client
-        .connect_with_timeout(timeout::get_env_timeout())
-        .await;
+    relay_pool
+        .ensure_relays(relay_targets.clone())
+        .await
+        .map_err(|err| Error::Generic(format!("relay ensure failed: {err}")))?;
 
     debug!("finding note(s) with filters: {:?}", filters);
 
-    let mut streamed_events = client
-        .stream_events(filters, Some(timeout::get_env_timeout()))
+    let timeout = timeout::get_env_timeout();
+    let mut streamed_events = relay_pool
+        .stream_events(filters, relay_targets.as_slice(), timeout)
         .await?;
 
     let mut num_loops = 0;
@@ -364,7 +363,12 @@ impl RenderData {
         };
     }
 
-    pub async fn complete(&mut self, ndb: Ndb, keys: Keys, nip19: Nip19) -> Result<()> {
+    pub async fn complete(
+        &mut self,
+        ndb: Ndb,
+        relay_pool: Arc<RelayPool>,
+        nip19: Nip19,
+    ) -> Result<()> {
         let mut stream = {
             let filter = renderdata_to_filter(self);
             if filter.is_empty() {
@@ -378,7 +382,8 @@ impl RenderData {
 
             let filters = filter.iter().map(convert_filter).collect();
             let ndb = ndb.clone();
-            tokio::spawn(async move { find_note(ndb, keys, filters, &nip19).await });
+            let pool = relay_pool.clone();
+            tokio::spawn(async move { find_note(pool, ndb, filters, &nip19).await });
             stream
         };
 

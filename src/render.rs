@@ -928,7 +928,12 @@ mod tests {
             .expect("ingest event with a tag");
 
         let sub_id = ndb.subscribe(&[wait_filter, wait_filter_2]).expect("sub");
-        let _r = ndb.wait_for_notes(sub_id, 2).await;
+        let _ = ndb
+            .wait_for_notes(sub_id, 2)
+            .await
+            .expect("wait for note ingestion to complete");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         {
             let txn = Transaction::new(&ndb).expect("transaction for d-tag lookup");

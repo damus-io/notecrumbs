@@ -8,19 +8,23 @@ use egui::{
     Visuals,
 };
 use nostr::event::kind::Kind;
-use nostr::types::{SingleLetterTag, Timestamp};
+use nostr::types::{RelayUrl, SingleLetterTag, Timestamp};
 use nostr_sdk::async_utility::futures_util::StreamExt;
 use nostr_sdk::nips::nip19::Nip19;
-use nostr_sdk::prelude::{Client, EventId, Keys, PublicKey};
+use nostr_sdk::prelude::{Client, Event, EventId, Keys, PublicKey};
 use nostrdb::{
     Block, BlockType, Blocks, FilterElement, FilterField, Mention, Ndb, Note, NoteKey, ProfileKey,
     ProfileRecord, Transaction,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::time::SystemTime;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, warn};
 
 const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
+pub const PROFILE_FEED_RECENT_LIMIT: usize = 12;
+pub const PROFILE_FEED_LOOKBACK_DAYS: u64 = 30;
+const DEFAULT_RELAYS: &[&str] = &["wss://relay.damus.io", "wss://nostr.wine", "wss://nos.lol"];
 
 pub enum NoteRenderData {
     Missing([u8; 32]),
@@ -149,6 +153,290 @@ impl RenderData {
             RenderData::Profile(_pkey) => false,
             RenderData::Note(rd) => rd.note_rd.needs_note(),
         }
+    }
+}
+
+pub async fn fetch_profile_feed(ndb: Ndb, keys: Keys, pubkey: [u8; 32]) -> Result<()> {
+    let client = Client::builder().signer(keys).build();
+    let mut known_relays = HashSet::new();
+    let mut targets = Vec::new();
+
+    for url in DEFAULT_RELAYS {
+        match RelayUrl::parse(url) {
+            Ok(relay) => match add_relay_if_new(&client, &mut known_relays, relay.clone()).await {
+                Ok(true) => targets.push(relay),
+                Ok(false) => {
+                    if !targets.iter().any(|existing| existing == &relay) {
+                        targets.push(relay);
+                    }
+                }
+                Err(err) => warn!("failed to add default relay {url}: {err}"),
+            },
+            Err(err) => warn!("invalid default relay {url}: {err}"),
+        }
+    }
+
+    client
+        .connect_with_timeout(timeout::get_env_timeout())
+        .await;
+
+    let targets =
+        collect_profile_relays(&client, ndb.clone(), &mut known_relays, targets, pubkey).await?;
+
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(
+            60 * 60 * 24 * PROFILE_FEED_LOOKBACK_DAYS,
+        ))
+        .and_then(|ts| ts.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|dur| dur.as_secs());
+
+    let (mut fetched, ingested_ids) = stream_profile_feed_once(
+        &client,
+        ndb.clone(),
+        &mut known_relays,
+        &targets,
+        pubkey,
+        cutoff,
+    )
+    .await?;
+    wait_for_profile_feed_ingestion(&ndb, &ingested_ids).await?;
+
+    if fetched == 0 {
+        let (fallback_fetched, fallback_ids) = stream_profile_feed_once(
+            &client,
+            ndb.clone(),
+            &mut known_relays,
+            &targets,
+            pubkey,
+            None,
+        )
+        .await?;
+        wait_for_profile_feed_ingestion(&ndb, &fallback_ids).await?;
+        fetched = fallback_fetched;
+    }
+
+    if fetched == 0 {
+        warn!(
+            profile = %hex::encode(pubkey),
+            "no profile notes fetched even after fallback"
+        );
+    }
+
+    Ok(())
+}
+
+fn collect_relay_hints(event: &Event) -> Vec<RelayUrl> {
+    let mut relays = Vec::new();
+    for tag in event.tags.as_slice() {
+        let parts = tag.as_slice();
+        if parts.is_empty() {
+            continue;
+        }
+        let tag_name = parts[0].as_str();
+        let candidate = if matches!(tag_name, "r" | "relay" | "relays") {
+            tag.content()
+        } else if event.kind == Kind::ContactList {
+            parts.get(2).map(|s| s.as_str())
+        } else {
+            None
+        };
+
+        let Some(url) = candidate else {
+            continue;
+        };
+        if url.is_empty() {
+            continue;
+        }
+
+        match RelayUrl::parse(url) {
+            Ok(relay) => relays.push(relay),
+            Err(err) => warn!("ignoring invalid relay hint {}: {}", url, err),
+        }
+    }
+    relays
+}
+
+async fn add_relay_hints(
+    client: &Client,
+    known: &mut HashSet<String>,
+    event: &Event,
+) -> Result<()> {
+    let hints = collect_relay_hints(event);
+    if hints.is_empty() {
+        return Ok(());
+    }
+
+    for hint in hints {
+        if let Err(err) = add_relay_if_new(client, known, hint).await {
+            warn!("failed to add hinted relay: {err}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn add_relay_if_new(
+    client: &Client,
+    known: &mut HashSet<String>,
+    relay: RelayUrl,
+) -> Result<bool> {
+    let key = relay.to_string();
+    if !known.insert(key.clone()) {
+        return Ok(false);
+    }
+
+    client
+        .add_relay(relay.clone())
+        .await
+        .map_err(|err| Error::Generic(format!("failed to add relay {relay}: {err}")))?;
+    if let Err(err) = client.connect_relay(relay.clone()).await {
+        warn!("failed to connect relay {}: {}", relay, err);
+    }
+    Ok(true)
+}
+
+async fn collect_profile_relays(
+    client: &Client,
+    ndb: Ndb,
+    known: &mut HashSet<String>,
+    mut targets: Vec<RelayUrl>,
+    pubkey: [u8; 32],
+) -> Result<Vec<RelayUrl>> {
+    use nostr_sdk::JsonUtil;
+
+    let author_ref = [&pubkey];
+
+    let relay_filter = convert_filter(
+        &nostrdb::Filter::new()
+            .authors(author_ref)
+            .kinds([Kind::RelayList.as_u16() as u64])
+            .limit(1)
+            .build(),
+    );
+
+    let contact_filter = convert_filter(
+        &nostrdb::Filter::new()
+            .authors(author_ref)
+            .kinds([Kind::ContactList.as_u16() as u64])
+            .limit(1)
+            .build(),
+    );
+
+    for filter in [relay_filter, contact_filter] {
+        let mut stream = client
+            .stream_events(vec![filter.clone()], Some(Duration::from_millis(2000)))
+            .await?;
+        while let Some(event) = stream.next().await {
+            if let Err(err) = ndb.process_event(&event.as_json()) {
+                error!("error processing relay discovery event: {err}");
+            }
+
+            for hint in collect_relay_hints(&event) {
+                match add_relay_if_new(client, known, hint.clone()).await {
+                    Ok(true) => targets.push(hint),
+                    Ok(false) => {}
+                    Err(err) => warn!("failed to add hinted relay: {err}"),
+                }
+            }
+        }
+    }
+
+    Ok(targets)
+}
+
+async fn stream_profile_feed_once(
+    client: &Client,
+    ndb: Ndb,
+    known: &mut HashSet<String>,
+    relays: &[RelayUrl],
+    pubkey: [u8; 32],
+    since: Option<u64>,
+) -> Result<(usize, Vec<[u8; 32]>)> {
+    use nostr_sdk::JsonUtil;
+
+    let filter = {
+        let author_ref = [&pubkey];
+        let mut builder = nostrdb::Filter::new()
+            .authors(author_ref)
+            .kinds([1])
+            .limit(PROFILE_FEED_RECENT_LIMIT as u64);
+
+        if let Some(since) = since {
+            builder = builder.since(since);
+        }
+
+        convert_filter(&builder.build())
+    };
+    let timeout = Duration::from_millis(2000);
+    let urls: Vec<String> = relays.iter().map(|r| r.to_string()).collect();
+
+    let mut stream = if urls.is_empty() {
+        client
+            .stream_events(vec![filter.clone()], Some(timeout))
+            .await?
+    } else {
+        client
+            .stream_events_from(urls, vec![filter.clone()], Some(timeout))
+            .await?
+    };
+
+    let mut fetched = 0usize;
+    let mut ingested = Vec::new();
+
+    while let Some(event) = stream.next().await {
+        if let Err(err) = ndb.process_event(&event.as_json()) {
+            error!(
+                profile = %hex::encode(pubkey),
+                event_id = %event.id,
+                "error processing profile feed event: {err}"
+            );
+        } else {
+            fetched += 1;
+            ingested.push(event.id.to_bytes());
+        }
+
+        if let Err(err) = add_relay_hints(client, known, &event).await {
+            warn!("failed to apply relay hints from profile feed: {err}");
+        }
+    }
+
+    Ok((fetched, ingested))
+}
+
+async fn wait_for_profile_feed_ingestion(ndb: &Ndb, note_ids: &[[u8; 32]]) -> Result<()> {
+    if note_ids.is_empty() {
+        return Ok(());
+    }
+
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut attempt = 0;
+
+    loop {
+        let missing: Vec<[u8; 32]> = {
+            let txn = Transaction::new(ndb)?;
+            note_ids
+                .iter()
+                .filter_map(|id| match ndb.get_note_by_id(&txn, id) {
+                    Ok(_) => None,
+                    Err(_) => Some(*id),
+                })
+                .collect()
+        };
+
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        attempt += 1;
+        if attempt >= MAX_ATTEMPTS {
+            warn!(
+                missing = missing.len(),
+                "profile feed notes still missing after retries"
+            );
+            return Ok(());
+        }
+
+        tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await;
     }
 }
 
@@ -305,15 +593,27 @@ pub async fn find_note(
     use nostr_sdk::JsonUtil;
 
     let client = Client::builder().signer(keys).build();
+    let mut known_relays = HashSet::new();
 
-    let _ = client.add_relay("wss://relay.damus.io").await;
-    let _ = client.add_relay("wss://nostr.wine").await;
-    let _ = client.add_relay("wss://nos.lol").await;
+    for url in DEFAULT_RELAYS {
+        match RelayUrl::parse(url) {
+            Ok(relay) => {
+                if let Err(err) = add_relay_if_new(&client, &mut known_relays, relay.clone()).await
+                {
+                    warn!("failed to add default relay {url}: {err}");
+                }
+            }
+            Err(err) => warn!("invalid default relay {url}: {err}"),
+        }
+    }
+
     let expected_events = filters.len();
 
     let other_relays = nip19::nip19_relays(nip19);
     for relay in other_relays {
-        let _ = client.add_relay(relay).await;
+        if let Err(err) = add_relay_if_new(&client, &mut known_relays, relay.clone()).await {
+            warn!("failed to add nip19 relay {}: {err}", relay);
+        }
     }
 
     client
@@ -331,6 +631,10 @@ pub async fn find_note(
         debug!("processing event {:?}", event);
         if let Err(err) = ndb.process_event(&event.as_json()) {
             error!("error processing event: {err}");
+        }
+
+        if let Err(err) = add_relay_hints(&client, &mut known_relays, &event).await {
+            warn!("failed to apply relay hints: {err}");
         }
 
         num_loops += 1;

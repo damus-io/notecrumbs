@@ -4,7 +4,9 @@ data.mdb
 lock.mdb
 .build-result
 .buildcmd
-/fonts
+/fonts/*
+!fonts/NotoSans-Regular.ttf
+!fonts/PoetsenOne-Regular.ttf
 TODO.bak
 tags
 perf.data

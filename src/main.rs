@@ -17,7 +17,7 @@ use crate::{
     render::{ProfileRenderData, RenderData},
 };
 use nostr_sdk::prelude::*;
-use nostrdb::{Config, Ndb, NoteKey, Transaction};
+use nostrdb::{Config, Filter, Ndb, NoteKey, Transaction};
 use std::time::Duration;
 
 mod abbrev;
@@ -185,10 +185,35 @@ async fn serve(
         };
 
         if let Some(pubkey) = maybe_pubkey {
-            if let Err(err) =
-                render::fetch_profile_feed(app.relay_pool.clone(), app.ndb.clone(), pubkey).await
-            {
-                error!("Error fetching profile feed: {err}");
+            // Check if we have cached notes for this profile
+            let has_cached_notes = {
+                let txn = Transaction::new(&app.ndb)?;
+                let notes_filter = Filter::new()
+                    .authors([&pubkey])
+                    .kinds([1])
+                    .limit(1)
+                    .build();
+                app.ndb
+                    .query(&txn, &[notes_filter], 1)
+                    .map(|results| !results.is_empty())
+                    .unwrap_or(false)
+            };
+
+            let pool = app.relay_pool.clone();
+            let ndb = app.ndb.clone();
+
+            if has_cached_notes {
+                // Cached data exists: spawn background refresh so we don't block response
+                tokio::spawn(async move {
+                    if let Err(err) = render::fetch_profile_feed(pool, ndb, pubkey).await {
+                        error!("Background profile feed refresh failed: {err}");
+                    }
+                });
+            } else {
+                // No cached data: must wait for relay fetch before rendering
+                if let Err(err) = render::fetch_profile_feed(pool, ndb, pubkey).await {
+                    error!("Error fetching profile feed: {err}");
+                }
             }
         }
     }

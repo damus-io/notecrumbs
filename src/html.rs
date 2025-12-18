@@ -232,7 +232,7 @@ fn ends_with(haystack: &str, needle: &str) -> bool {
         .is_some_and(|tail| tail.eq_ignore_ascii_case(needle))
 }
 
-fn base_url(url: &str) -> &str {
+fn strip_querystring(url: &str) -> &str {
     let end = url.find(['?', '#']).unwrap_or(url.len());
 
     &url[..end]
@@ -241,7 +241,9 @@ fn base_url(url: &str) -> &str {
 fn is_video(url: &str) -> bool {
     const VIDEOS: [&str; 2] = ["mp4", "mov"];
 
-    VIDEOS.iter().any(|ext| ends_with(base_url(url), ext))
+    VIDEOS
+        .iter()
+        .any(|ext| ends_with(strip_querystring(url), ext))
 }
 
 fn is_image(url: &str) -> bool {
@@ -249,7 +251,9 @@ fn is_image(url: &str) -> bool {
         "jpg", "jpeg", "png", "gif", "webp", "svg", "avif", "bmp", "ico", "apng",
     ];
 
-    IMAGES.iter().any(|ext| ends_with(base_url(url), ext))
+    IMAGES
+        .iter()
+        .any(|ext| ends_with(strip_querystring(url), ext))
 }
 
 pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
@@ -673,12 +677,7 @@ pub fn serve_profile_html(
         .map(str::trim)
         .filter(|about| !about.is_empty())
         .unwrap_or("");
-    let host = r
-        .headers()
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("localhost:3000");
-    let base_url = format!("http://{host}");
+    let base_url = get_base_url();
 
     let display_name_html = html_escape::encode_text(display_name_raw).into_owned();
     let username_html = html_escape::encode_text(username_raw).into_owned();
@@ -895,12 +894,7 @@ pub fn serve_profile_html(
         )
     };
 
-    let host = r
-        .headers()
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("localhost:3000");
-    let base_url = format!("http://{host}");
+    let base_url = get_base_url();
     let bech32 = nip.to_bech32().unwrap_or_default();
     let canonical_url = format!("{base_url}/{bech32}");
 
@@ -998,12 +992,7 @@ pub fn serve_profile_html(
 }
 
 pub fn serve_homepage(r: Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>, Error> {
-    let host = r
-        .headers()
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("localhost:3000");
-    let base_url = format!("http://{}", host);
+    let base_url = get_base_url();
 
     let page_title = "Damus — notecrumbs frontend";
     let description =
@@ -1110,6 +1099,10 @@ pub fn serve_homepage(r: Request<hyper::body::Incoming>) -> Result<Response<Full
         .body(Full::new(Bytes::from(data)))?)
 }
 
+fn get_base_url() -> String {
+    std::env::var("NOTECRUMBS_BASE_URL").unwrap_or_else(|_| "https://damus.io".to_string())
+}
+
 pub fn serve_note_html(
     app: &Notecrumbs,
     nip19: &Nip19,
@@ -1146,13 +1139,8 @@ pub fn serve_note_html(
         profile_record,
     );
 
-    let host = r
-        .headers()
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("localhost:3000");
-    let base_url = format!("http://{}", host);
     let note_bech32 = nip19.to_bech32().unwrap();
+    let base_url = get_base_url();
     let canonical_url = format!("{}/{}", base_url, note_bech32);
     let fallback_image_url = format!("{}/{}.png", base_url, note_bech32);
 

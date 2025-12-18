@@ -1,4 +1,8 @@
 use std::net::SocketAddr;
+use std::time::Instant;
+
+use dashmap::DashMap;
+use tokio::task::AbortHandle;
 
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -17,7 +21,7 @@ use crate::{
     render::{ProfileRenderData, RenderData},
 };
 use nostr_sdk::prelude::*;
-use nostrdb::{Config, Ndb, NoteKey, Transaction};
+use nostrdb::{Config, Filter, Ndb, NoteKey, Transaction};
 use std::time::Duration;
 
 mod abbrev;
@@ -37,6 +41,20 @@ const POETSEN_FONT: &[u8] = include_bytes!("../fonts/PoetsenOne-Regular.ttf");
 const DEFAULT_PFP_IMAGE: &[u8] = include_bytes!("../assets/default_pfp.jpg");
 const DAMUS_LOGO_ICON: &[u8] = include_bytes!("../assets/logo_icon.png");
 
+/// Minimum interval between background profile feed refreshes for the same pubkey
+const PROFILE_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// Prune refresh tracking map when it exceeds this size (deliberate limit, ~40KB max memory)
+const PROFILE_REFRESH_MAP_PRUNE_THRESHOLD: usize = 1000;
+
+/// Tracks the state of a background profile refresh
+enum ProfileRefreshState {
+    /// Refresh currently in progress with handle to abort if stuck
+    InProgress { started: Instant, handle: AbortHandle },
+    /// Last successful refresh completed at this time
+    Completed(Instant),
+}
+
 #[derive(Clone)]
 pub struct Notecrumbs {
     pub ndb: Ndb,
@@ -49,6 +67,9 @@ pub struct Notecrumbs {
 
     /// How long do we wait for remote note requests
     _timeout: Duration,
+
+    /// Tracks refresh state per pubkey - prevents excessive relay queries and concurrent fetches
+    profile_refresh_state: Arc<DashMap<[u8; 32], ProfileRefreshState>>,
 }
 
 #[inline]
@@ -185,10 +206,118 @@ async fn serve(
         };
 
         if let Some(pubkey) = maybe_pubkey {
-            if let Err(err) =
-                render::fetch_profile_feed(app.relay_pool.clone(), app.ndb.clone(), pubkey).await
-            {
-                error!("Error fetching profile feed: {err}");
+            // Check if we have cached notes for this profile
+            let has_cached_notes = {
+                let txn = Transaction::new(&app.ndb)?;
+                let notes_filter = Filter::new()
+                    .authors([&pubkey])
+                    .kinds([1])
+                    .limit(1)
+                    .build();
+                app.ndb
+                    .query(&txn, &[notes_filter], 1)
+                    .map(|results| !results.is_empty())
+                    .unwrap_or(false)
+            };
+
+            let pool = app.relay_pool.clone();
+            let ndb = app.ndb.clone();
+
+            if has_cached_notes {
+                // Cached data exists: spawn background refresh so we don't block response.
+                // Rate-limit refreshes per pubkey to avoid hammering relays on hot profiles.
+                let now = Instant::now();
+                let state_map = &app.profile_refresh_state;
+
+                // Prune stale completed entries to bound memory growth
+                if state_map.len() > PROFILE_REFRESH_MAP_PRUNE_THRESHOLD {
+                    state_map.retain(|_, state| match state {
+                        ProfileRefreshState::InProgress { .. } => true,
+                        ProfileRefreshState::Completed(t) => {
+                            now.duration_since(*t) < PROFILE_REFRESH_INTERVAL
+                        }
+                    });
+                }
+
+                // Use entry API for atomic check-and-insert to prevent race conditions
+                // where concurrent requests could each spawn a refresh
+                use dashmap::mapref::entry::Entry;
+                match state_map.entry(pubkey) {
+                    Entry::Occupied(mut occupied) => {
+                        let should_refresh = match occupied.get() {
+                            // Already refreshing - skip unless stuck (>10 min)
+                            ProfileRefreshState::InProgress { started, .. }
+                                if now.duration_since(*started) < Duration::from_secs(10 * 60) =>
+                            {
+                                false
+                            }
+                            // Recently completed - skip refresh
+                            ProfileRefreshState::Completed(t)
+                                if now.duration_since(*t) < PROFILE_REFRESH_INTERVAL =>
+                            {
+                                false
+                            }
+                            // Stuck fetch - abort and restart
+                            ProfileRefreshState::InProgress { handle, .. } => {
+                                handle.abort();
+                                true
+                            }
+                            // Stale completion - refresh
+                            ProfileRefreshState::Completed(_) => true,
+                        };
+
+                        if should_refresh {
+                            let refresh_state = app.profile_refresh_state.clone();
+                            let handle = tokio::spawn(async move {
+                                let result = render::fetch_profile_feed(pool, ndb, pubkey).await;
+                                match result {
+                                    Ok(()) => {
+                                        refresh_state.insert(
+                                            pubkey,
+                                            ProfileRefreshState::Completed(Instant::now()),
+                                        );
+                                    }
+                                    Err(err) => {
+                                        error!("Background profile feed refresh failed: {err}");
+                                        refresh_state.remove(&pubkey);
+                                    }
+                                }
+                            });
+                            occupied.insert(ProfileRefreshState::InProgress {
+                                started: now,
+                                handle: handle.abort_handle(),
+                            });
+                        }
+                    }
+                    Entry::Vacant(vacant) => {
+                        // No existing state - start refresh
+                        let refresh_state = app.profile_refresh_state.clone();
+                        let handle = tokio::spawn(async move {
+                            let result = render::fetch_profile_feed(pool, ndb, pubkey).await;
+                            match result {
+                                Ok(()) => {
+                                    refresh_state.insert(
+                                        pubkey,
+                                        ProfileRefreshState::Completed(Instant::now()),
+                                    );
+                                }
+                                Err(err) => {
+                                    error!("Background profile feed refresh failed: {err}");
+                                    refresh_state.remove(&pubkey);
+                                }
+                            }
+                        });
+                        vacant.insert(ProfileRefreshState::InProgress {
+                            started: now,
+                            handle: handle.abort_handle(),
+                        });
+                    }
+                }
+            } else {
+                // No cached data: must wait for relay fetch before rendering
+                if let Err(err) = render::fetch_profile_feed(pool, ndb, pubkey).await {
+                    error!("Error fetching profile feed: {err}");
+                }
             }
         }
     }
@@ -304,6 +433,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         font_data,
         default_pfp,
         prometheus_handle,
+        profile_refresh_state: Arc::new(DashMap::new()),
     };
 
     // We start a loop to continuously accept incoming connections

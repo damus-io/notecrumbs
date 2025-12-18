@@ -1,15 +1,15 @@
 use crate::Error;
 use crate::{
-    Notecrumbs,
     abbrev::{abbrev_str, abbreviate},
-    render::{NoteAndProfileRenderData, PROFILE_FEED_RECENT_LIMIT, ProfileRenderData},
+    render::{NoteAndProfileRenderData, ProfileRenderData, PROFILE_FEED_RECENT_LIMIT},
+    Notecrumbs,
 };
 use ammonia::Builder as HtmlSanitizer;
 use http_body_util::Full;
-use hyper::{Request, Response, StatusCode, body::Bytes, header};
+use hyper::{body::Bytes, header, Request, Response, StatusCode};
 use nostr_sdk::prelude::{Nip19, PublicKey, ToBech32};
 use nostrdb::{BlockType, Blocks, Filter, Mention, Ndb, Note, NoteKey, Transaction};
-use pulldown_cmark::{Options, Parser, html};
+use pulldown_cmark::{html, Options, Parser};
 use std::fmt::Write as _;
 use std::io::Write;
 use std::str::FromStr;

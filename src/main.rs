@@ -50,7 +50,10 @@ const PROFILE_REFRESH_MAP_PRUNE_THRESHOLD: usize = 1000;
 /// Tracks the state of a background profile refresh
 enum ProfileRefreshState {
     /// Refresh currently in progress with handle to abort if stuck
-    InProgress { started: Instant, handle: AbortHandle },
+    InProgress {
+        started: Instant,
+        handle: AbortHandle,
+    },
     /// Last successful refresh completed at this time
     Completed(Instant),
 }
@@ -209,11 +212,7 @@ async fn serve(
             // Check if we have cached notes for this profile
             let has_cached_notes = {
                 let txn = Transaction::new(&app.ndb)?;
-                let notes_filter = Filter::new()
-                    .authors([&pubkey])
-                    .kinds([1])
-                    .limit(1)
-                    .build();
+                let notes_filter = Filter::new().authors([&pubkey]).kinds([1]).limit(1).build();
                 app.ndb
                     .query(&txn, &[notes_filter], 1)
                     .map(|results| !results.is_empty())

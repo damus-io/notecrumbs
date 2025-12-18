@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -37,6 +40,12 @@ const POETSEN_FONT: &[u8] = include_bytes!("../fonts/PoetsenOne-Regular.ttf");
 const DEFAULT_PFP_IMAGE: &[u8] = include_bytes!("../assets/default_pfp.jpg");
 const DAMUS_LOGO_ICON: &[u8] = include_bytes!("../assets/logo_icon.png");
 
+/// Minimum interval between background profile feed refreshes for the same pubkey
+const PROFILE_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// Prune refresh tracking map when it exceeds this size (deliberate limit, ~40KB max memory)
+const PROFILE_REFRESH_MAP_PRUNE_THRESHOLD: usize = 1000;
+
 #[derive(Clone)]
 pub struct Notecrumbs {
     pub ndb: Ndb,
@@ -49,6 +58,9 @@ pub struct Notecrumbs {
 
     /// How long do we wait for remote note requests
     _timeout: Duration,
+
+    /// Tracks last successful refresh time per pubkey to rate-limit background fetches
+    profile_last_refresh: Arc<Mutex<HashMap<[u8; 32], Instant>>>,
 }
 
 #[inline]
@@ -203,12 +215,48 @@ async fn serve(
             let ndb = app.ndb.clone();
 
             if has_cached_notes {
-                // Cached data exists: spawn background refresh so we don't block response
-                tokio::spawn(async move {
-                    if let Err(err) = render::fetch_profile_feed(pool, ndb, pubkey).await {
-                        error!("Background profile feed refresh failed: {err}");
+                // Cached data exists: spawn background refresh so we don't block response.
+                // Rate-limit refreshes per pubkey to avoid hammering relays on hot profiles.
+                let should_refresh = {
+                    let mut last_refresh = app.profile_last_refresh.lock().unwrap();
+                    let now = Instant::now();
+
+                    // Prune stale entries to bound memory growth
+                    if last_refresh.len() > PROFILE_REFRESH_MAP_PRUNE_THRESHOLD {
+                        last_refresh
+                            .retain(|_, t| now.duration_since(*t) < PROFILE_REFRESH_INTERVAL);
                     }
-                });
+
+                    match last_refresh.get(&pubkey) {
+                        Some(&last) if now.duration_since(last) < PROFILE_REFRESH_INTERVAL => false,
+                        _ => {
+                            last_refresh.insert(pubkey, now);
+                            true
+                        }
+                    }
+                };
+
+                if should_refresh {
+                    let last_refresh_map = app.profile_last_refresh.clone();
+                    tokio::spawn(async move {
+                        let result = render::fetch_profile_feed(pool, ndb, pubkey).await;
+                        match result {
+                            Ok(()) => {
+                                // Update timestamp on success
+                                if let Ok(mut map) = last_refresh_map.lock() {
+                                    map.insert(pubkey, Instant::now());
+                                }
+                            }
+                            Err(err) => {
+                                error!("Background profile feed refresh failed: {err}");
+                                // Clear on failure so next request retries immediately
+                                if let Ok(mut map) = last_refresh_map.lock() {
+                                    map.remove(&pubkey);
+                                }
+                            }
+                        }
+                    });
+                }
             } else {
                 // No cached data: must wait for relay fetch before rendering
                 if let Err(err) = render::fetch_profile_feed(pool, ndb, pubkey).await {
@@ -329,6 +377,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         font_data,
         default_pfp,
         prometheus_handle,
+        profile_last_refresh: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // We start a loop to continuously accept incoming connections

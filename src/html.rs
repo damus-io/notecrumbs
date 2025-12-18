@@ -221,8 +221,12 @@ pub fn serve_note_json(
 }
 
 fn ends_with(haystack: &str, needle: &str) -> bool {
-    haystack.len() >= needle.len()
-        && haystack[haystack.len() - needle.len()..].eq_ignore_ascii_case(needle)
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    haystack
+        .get(haystack.len() - needle.len()..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(needle))
 }
 
 fn is_image(url: &str) -> bool {

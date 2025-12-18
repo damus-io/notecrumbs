@@ -1,15 +1,15 @@
 use crate::Error;
 use crate::{
-    abbrev::{abbrev_str, abbreviate},
-    render::{NoteAndProfileRenderData, ProfileRenderData, PROFILE_FEED_RECENT_LIMIT},
     Notecrumbs,
+    abbrev::{abbrev_str, abbreviate},
+    render::{NoteAndProfileRenderData, PROFILE_FEED_RECENT_LIMIT, ProfileRenderData},
 };
 use ammonia::Builder as HtmlSanitizer;
 use http_body_util::Full;
-use hyper::{body::Bytes, header, Request, Response, StatusCode};
+use hyper::{Request, Response, StatusCode, body::Bytes, header};
 use nostr_sdk::prelude::{Nip19, PublicKey, ToBech32};
 use nostrdb::{BlockType, Blocks, Filter, Mention, Ndb, Note, NoteKey, Transaction};
-use pulldown_cmark::{html, Options, Parser};
+use pulldown_cmark::{Options, Parser, html};
 use std::fmt::Write as _;
 use std::io::Write;
 use std::str::FromStr;
@@ -229,21 +229,24 @@ fn ends_with(haystack: &str, needle: &str) -> bool {
         .is_some_and(|tail| tail.eq_ignore_ascii_case(needle))
 }
 
+fn base_url(url: &str) -> &str {
+    let end = url.find(|c| c == '?' || c == '#').unwrap_or(url.len());
+
+    &url[..end]
+}
+
+fn is_video(url: &str) -> bool {
+    const VIDEOS: [&str; 2] = ["mp4", "mov"];
+
+    VIDEOS.iter().any(|ext| ends_with(base_url(url), ext))
+}
+
 fn is_image(url: &str) -> bool {
     const IMAGES: [&str; 10] = [
         "jpg", "jpeg", "png", "gif", "webp", "svg", "avif", "bmp", "ico", "apng",
     ];
 
-    // Strip query string and fragment: ?foo=1#bar
-    let base = url
-        .split_once('?')
-        .map(|(s, _)| s)
-        .unwrap_or(url)
-        .split_once('#')
-        .map(|(s, _)| s)
-        .unwrap_or(url);
-
-    IMAGES.iter().any(|ext| ends_with(base, ext))
+    IMAGES.iter().any(|ext| ends_with(base_url(url), ext))
 }
 
 pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
@@ -253,6 +256,12 @@ pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
                 let url = html_escape::encode_text(block.as_str());
                 if is_image(&url) {
                     let _ = write!(body, r#"<img src="{}">"#, url);
+                } else if is_video(&url) {
+                    let _ = write!(
+                        body,
+                        r#"<video src="{}" loop autoplay muted playsinline controls></video>"#,
+                        url
+                    );
                 } else {
                     let _ = write!(body, r#"<a href="{}">{}</a>"#, url, url);
                 }
@@ -923,7 +932,7 @@ pub fn serve_profile_html(
 
     let page = format!(
         "<!DOCTYPE html>\n\
-<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <title>{page_title}</title>\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n    <meta name=\"description\" content=\"{og_description}\" />\n    <link rel=\"preload\" href=\"/fonts/PoetsenOne-Regular.ttf\" as=\"font\" type=\"font/ttf\" crossorigin />\n    <link rel=\"stylesheet\" href=\"/damus.css?v=2\" type=\"text/css\" />\n    <meta property=\"og:title\" content=\"{og_title}\" />\n    <meta property=\"og:description\" content=\"{og_description}\" />\n    <meta property=\"og:type\" content=\"profile\" />\n    <meta property=\"og:url\" content=\"{canonical_url}\" />\n    <meta property=\"og:image\" content=\"{og_image}\" />\n    <meta property=\"og:image:alt\" content=\"{og_image_alt}\" />\n    <meta property=\"og:image:height\" content=\"600\" />\n    <meta property=\"og:image:width\" content=\"1200\" />\n    <meta property=\"og:image:type\" content=\"image/png\" />\n    <meta property=\"og:site_name\" content=\"Damus\" />\n    <meta name=\"twitter:card\" content=\"summary_large_image\" />\n    <meta name=\"twitter:title\" content=\"{og_title}\" />\n    <meta name=\"twitter:description\" content=\"{og_description}\" />\n    <meta name=\"twitter:image\" content=\"{og_image}\" />\n    <meta name=\"theme-color\" content=\"#bd66ff\" />\n  </head>\n  <body>\n    <div class=\"damus-app\">\n      <header class=\"damus-header\">\n        <a class=\"damus-logo-link\" href=\"https://damus.io\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"damus-logo-image\" src=\"/assets/logo_icon.png?v=2\" alt=\"Damus\" width=\"40\" height=\"40\" /></a>\n        <div class=\"damus-header-actions\">\n          <a class=\"damus-cta\" data-damus-cta data-default-url=\"nostr:{bech32}\" href=\"nostr:{bech32}\">Open in Damus</a>\n        </div>\n      </header>\n      <main class=\"damus-main\">\n{main_content}\n      </main>\n      <footer class=\"damus-footer\">\n        <a href=\"https://github.com/damus-io/notecrumbs\" target=\"_blank\" rel=\"noopener noreferrer\">Rendered by notecrumbs</a>\n      </footer>\n    </div>\n{scripts}\n  </body>\n</html>\n",
+<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <title>{page_title}</title>\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n    <meta name=\"description\" content=\"{og_description}\" />\n    <link rel=\"preload\" href=\"/fonts/PoetsenOne-Regular.ttf\" as=\"font\" type=\"font/ttf\" crossorigin />\n    <link rel=\"stylesheet\" href=\"/damus.css?v=3\" type=\"text/css\" />\n    <meta property=\"og:title\" content=\"{og_title}\" />\n    <meta property=\"og:description\" content=\"{og_description}\" />\n    <meta property=\"og:type\" content=\"profile\" />\n    <meta property=\"og:url\" content=\"{canonical_url}\" />\n    <meta property=\"og:image\" content=\"{og_image}\" />\n    <meta property=\"og:image:alt\" content=\"{og_image_alt}\" />\n    <meta property=\"og:image:height\" content=\"600\" />\n    <meta property=\"og:image:width\" content=\"1200\" />\n    <meta property=\"og:image:type\" content=\"image/png\" />\n    <meta property=\"og:site_name\" content=\"Damus\" />\n    <meta name=\"twitter:card\" content=\"summary_large_image\" />\n    <meta name=\"twitter:title\" content=\"{og_title}\" />\n    <meta name=\"twitter:description\" content=\"{og_description}\" />\n    <meta name=\"twitter:image\" content=\"{og_image}\" />\n    <meta name=\"theme-color\" content=\"#bd66ff\" />\n  </head>\n  <body>\n    <div class=\"damus-app\">\n      <header class=\"damus-header\">\n        <a class=\"damus-logo-link\" href=\"https://damus.io\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"damus-logo-image\" src=\"/assets/logo_icon.png?v=2\" alt=\"Damus\" width=\"40\" height=\"40\" /></a>\n        <div class=\"damus-header-actions\">\n          <a class=\"damus-cta\" data-damus-cta data-default-url=\"nostr:{bech32}\" href=\"nostr:{bech32}\">Open in Damus</a>\n        </div>\n      </header>\n      <main class=\"damus-main\">\n{main_content}\n      </main>\n      <footer class=\"damus-footer\">\n        <a href=\"https://github.com/damus-io/notecrumbs\" target=\"_blank\" rel=\"noopener noreferrer\">Rendered by notecrumbs</a>\n      </footer>\n    </div>\n{scripts}\n  </body>\n</html>\n",
         page_title = page_title_html,
         og_description = og_description_attr,
         og_image = og_image_attr,
@@ -981,7 +990,7 @@ pub fn serve_homepage(r: Request<hyper::body::Incoming>) -> Result<Response<Full
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="{description}" />
     <link rel="preload" href="/fonts/PoetsenOne-Regular.ttf" as="font" type="font/ttf" crossorigin />
-    <link rel="stylesheet" href="/damus.css?v=2" type="text/css" />
+    <link rel="stylesheet" href="/damus.css?v=3" type="text/css" />
     <meta property="og:title" content="{og_title}" />
     <meta property="og:description" content="{description}" />
     <meta property="og:type" content="website" />
@@ -1209,7 +1218,7 @@ pub fn serve_note_html(
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="{og_description}" />
     <link rel="preload" href="/fonts/PoetsenOne-Regular.ttf" as="font" type="font/ttf" crossorigin />
-    <link rel="stylesheet" href="/damus.css?v=2" type="text/css" />
+    <link rel="stylesheet" href="/damus.css?v=3" type="text/css" />
     <meta property="og:title" content="{og_title}" />
     <meta property="og:description" content="{og_description}" />
     <meta property="og:type" content="{og_type}" />

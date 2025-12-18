@@ -300,6 +300,12 @@ a:hover {
   font-size: 0.9rem;
 }
 
+.damus-note-body video {
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+}
+
 .damus-note-body pre {
   background: rgba(0, 0, 0, 0.35);
   padding: 1rem;

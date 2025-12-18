@@ -230,7 +230,7 @@ fn ends_with(haystack: &str, needle: &str) -> bool {
 }
 
 fn base_url(url: &str) -> &str {
-    let end = url.find(|c| c == '?' || c == '#').unwrap_or(url.len());
+    let end = url.find(['?', '#']).unwrap_or(url.len());
 
     &url[..end]
 }
@@ -315,6 +315,7 @@ pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_note_content_html(
     app: &Notecrumbs,
     note: &Note,
@@ -355,6 +356,7 @@ fn build_note_content_html(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_article_content_html(
     author_display: &str,
     pfp_url: &str,

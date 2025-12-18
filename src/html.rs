@@ -919,7 +919,7 @@ pub fn serve_profile_html(
 
     let page = format!(
         "<!DOCTYPE html>\n\
-<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <title>{page_title}</title>\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n    <meta name=\"description\" content=\"{og_description}\" />\n    <link rel=\"preload\" href=\"/fonts/PoetsenOne-Regular.ttf\" as=\"font\" type=\"font/ttf\" crossorigin />\n    <link rel=\"stylesheet\" href=\"/damus.css\" type=\"text/css\" />\n    <meta property=\"og:title\" content=\"{og_title}\" />\n    <meta property=\"og:description\" content=\"{og_description}\" />\n    <meta property=\"og:type\" content=\"profile\" />\n    <meta property=\"og:url\" content=\"{canonical_url}\" />\n    <meta property=\"og:image\" content=\"{og_image}\" />\n    <meta property=\"og:image:alt\" content=\"{og_image_alt}\" />\n    <meta property=\"og:image:height\" content=\"600\" />\n    <meta property=\"og:image:width\" content=\"1200\" />\n    <meta property=\"og:image:type\" content=\"image/png\" />\n    <meta property=\"og:site_name\" content=\"Damus\" />\n    <meta name=\"twitter:card\" content=\"summary_large_image\" />\n    <meta name=\"twitter:title\" content=\"{og_title}\" />\n    <meta name=\"twitter:description\" content=\"{og_description}\" />\n    <meta name=\"twitter:image\" content=\"{og_image}\" />\n    <meta name=\"theme-color\" content=\"#bd66ff\" />\n  </head>\n  <body>\n    <div class=\"damus-app\">\n      <header class=\"damus-header\">\n        <a class=\"damus-logo-link\" href=\"https://damus.io\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"damus-logo-image\" src=\"/assets/logo_icon.png\" alt=\"Damus\" width=\"40\" height=\"40\" /></a>\n        <div class=\"damus-header-actions\">\n          <a class=\"damus-cta\" data-damus-cta data-default-url=\"nostr:{bech32}\" href=\"nostr:{bech32}\">Open in Damus</a>\n        </div>\n      </header>\n      <main class=\"damus-main\">\n{main_content}\n      </main>\n      <footer class=\"damus-footer\">\n        <a href=\"https://github.com/damus-io/notecrumbs\" target=\"_blank\" rel=\"noopener noreferrer\">Rendered by notecrumbs</a>\n      </footer>\n    </div>\n{scripts}\n  </body>\n</html>\n",
+<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <title>{page_title}</title>\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n    <meta name=\"description\" content=\"{og_description}\" />\n    <link rel=\"preload\" href=\"/fonts/PoetsenOne-Regular.ttf\" as=\"font\" type=\"font/ttf\" crossorigin />\n    <link rel=\"stylesheet\" href=\"/damus.css?v=2\" type=\"text/css\" />\n    <meta property=\"og:title\" content=\"{og_title}\" />\n    <meta property=\"og:description\" content=\"{og_description}\" />\n    <meta property=\"og:type\" content=\"profile\" />\n    <meta property=\"og:url\" content=\"{canonical_url}\" />\n    <meta property=\"og:image\" content=\"{og_image}\" />\n    <meta property=\"og:image:alt\" content=\"{og_image_alt}\" />\n    <meta property=\"og:image:height\" content=\"600\" />\n    <meta property=\"og:image:width\" content=\"1200\" />\n    <meta property=\"og:image:type\" content=\"image/png\" />\n    <meta property=\"og:site_name\" content=\"Damus\" />\n    <meta name=\"twitter:card\" content=\"summary_large_image\" />\n    <meta name=\"twitter:title\" content=\"{og_title}\" />\n    <meta name=\"twitter:description\" content=\"{og_description}\" />\n    <meta name=\"twitter:image\" content=\"{og_image}\" />\n    <meta name=\"theme-color\" content=\"#bd66ff\" />\n  </head>\n  <body>\n    <div class=\"damus-app\">\n      <header class=\"damus-header\">\n        <a class=\"damus-logo-link\" href=\"https://damus.io\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"damus-logo-image\" src=\"/assets/logo_icon.png?v=2\" alt=\"Damus\" width=\"40\" height=\"40\" /></a>\n        <div class=\"damus-header-actions\">\n          <a class=\"damus-cta\" data-damus-cta data-default-url=\"nostr:{bech32}\" href=\"nostr:{bech32}\">Open in Damus</a>\n        </div>\n      </header>\n      <main class=\"damus-main\">\n{main_content}\n      </main>\n      <footer class=\"damus-footer\">\n        <a href=\"https://github.com/damus-io/notecrumbs\" target=\"_blank\" rel=\"noopener noreferrer\">Rendered by notecrumbs</a>\n      </footer>\n    </div>\n{scripts}\n  </body>\n</html>\n",
         page_title = page_title_html,
         og_description = og_description_attr,
         og_image = og_image_attr,
@@ -977,7 +977,7 @@ pub fn serve_homepage(r: Request<hyper::body::Incoming>) -> Result<Response<Full
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="{description}" />
     <link rel="preload" href="/fonts/PoetsenOne-Regular.ttf" as="font" type="font/ttf" crossorigin />
-    <link rel="stylesheet" href="/damus.css" type="text/css" />
+    <link rel="stylesheet" href="/damus.css?v=2" type="text/css" />
     <meta property="og:title" content="{og_title}" />
     <meta property="og:description" content="{description}" />
     <meta property="og:type" content="website" />
@@ -993,7 +993,7 @@ pub fn serve_homepage(r: Request<hyper::body::Incoming>) -> Result<Response<Full
   <body>
     <div class="damus-app">
       <header class="damus-header">
-        <a class="damus-logo-link" href="https://damus.io" target="_blank" rel="noopener noreferrer"><img class="damus-logo-image" src="/assets/logo_icon.png" alt="Damus" width="40" height="40" /></a>
+        <a class="damus-logo-link" href="https://damus.io" target="_blank" rel="noopener noreferrer"><img class="damus-logo-image" src="/assets/logo_icon.png?v=2" alt="Damus" width="40" height="40" /></a>
         <div class="damus-header-actions">
           <a class="damus-link" href="https://damus.io" target="_blank" rel="noopener noreferrer">damus.io</a>
           <a class="damus-cta" data-damus-cta data-default-url="https://damus.io" data-default-target="_blank" rel="noopener noreferrer" href="https://damus.io">Open in Damus</a>
@@ -1205,7 +1205,7 @@ pub fn serve_note_html(
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="{og_description}" />
     <link rel="preload" href="/fonts/PoetsenOne-Regular.ttf" as="font" type="font/ttf" crossorigin />
-    <link rel="stylesheet" href="/damus.css" type="text/css" />
+    <link rel="stylesheet" href="/damus.css?v=2" type="text/css" />
     <meta property="og:title" content="{og_title}" />
     <meta property="og:description" content="{og_description}" />
     <meta property="og:type" content="{og_type}" />
@@ -1225,7 +1225,7 @@ pub fn serve_note_html(
   <body>
     <div class="damus-app">
       <header class="damus-header">
-        <a class="damus-logo-link" href="https://damus.io" target="_blank" rel="noopener noreferrer"><img class="damus-logo-image" src="/assets/logo_icon.png" alt="Damus" width="40" height="40" /></a>
+        <a class="damus-logo-link" href="https://damus.io" target="_blank" rel="noopener noreferrer"><img class="damus-logo-image" src="/assets/logo_icon.png?v=2" alt="Damus" width="40" height="40" /></a>
         <div class="damus-header-actions">
           <a class="damus-cta" data-damus-cta data-default-url="nostr:{bech32}" href="nostr:{bech32}">Open in Damus</a>
         </div>

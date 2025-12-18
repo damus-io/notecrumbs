@@ -1,5 +1,6 @@
-use crate::timeout;
-use crate::{abbrev::abbrev_str, error::Result, fonts, nip19, Error, Notecrumbs};
+use crate::{
+    abbrev::abbrev_str, error::Result, fonts, nip19, relay_pool::RelayPool, Error, Notecrumbs,
+};
 use egui::epaint::Shadow;
 use egui::{
     pos2,
@@ -7,20 +8,29 @@ use egui::{
     Color32, FontFamily, FontId, Mesh, Rect, RichText, Rounding, Shape, TextureHandle, Vec2,
     Visuals,
 };
-use nostr::event::kind::Kind;
-use nostr::types::{SingleLetterTag, Timestamp};
+use nostr::event::{
+    kind::Kind,
+    tag::{TagKind, TagStandard},
+};
+use nostr::nips::nip01::Coordinate;
+use nostr::types::{RelayUrl, SingleLetterTag, Timestamp};
 use nostr_sdk::async_utility::futures_util::StreamExt;
 use nostr_sdk::nips::nip19::Nip19;
-use nostr_sdk::prelude::{Client, EventId, Keys, PublicKey};
+use nostr_sdk::prelude::{Event, EventId, PublicKey};
+use nostr_sdk::JsonUtil;
 use nostrdb::{
     Block, BlockType, Blocks, FilterElement, FilterField, Mention, Ndb, Note, NoteKey, ProfileKey,
     ProfileRecord, Transaction,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, warn};
 
 const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
+pub const PROFILE_FEED_RECENT_LIMIT: usize = 12;
+pub const PROFILE_FEED_LOOKBACK_DAYS: u64 = 30;
 
 pub enum NoteRenderData {
     Missing([u8; 32]),
@@ -189,7 +199,7 @@ fn renderdata_to_filter(render_data: &RenderData) -> Vec<nostrdb::Filter> {
     filters
 }
 
-fn convert_filter(ndb_filter: &nostrdb::Filter) -> nostr::types::Filter {
+pub(crate) fn convert_filter(ndb_filter: &nostrdb::Filter) -> nostr::types::Filter {
     let mut filter = nostr::types::Filter::new();
 
     for element in ndb_filter {
@@ -258,8 +268,12 @@ fn convert_filter(ndb_filter: &nostrdb::Filter) -> nostr::types::Filter {
 }
 
 fn coordinate_tag(author: &[u8; 32], kind: u64, identifier: &str) -> String {
-    let pk_hex = hex::encode(author);
-    format!("{}:{}:{}", kind, pk_hex, identifier)
+    let Ok(public_key) = PublicKey::from_slice(author) else {
+        return String::new();
+    };
+    let nostr_kind = Kind::from_u16(kind as u16);
+    let coordinate = Coordinate::new(nostr_kind, public_key).identifier(identifier);
+    coordinate.to_string()
 }
 
 fn build_address_filter(author: &[u8; 32], kind: u64, identifier: &str) -> nostrdb::Filter {
@@ -290,44 +304,45 @@ fn query_note_by_address<'a>(
         results = ndb.query(txn, &[coord_filter], 1)?;
     }
     if let Some(result) = results.first() {
-        Ok(result.note.clone())
+        ndb.get_note_by_key(txn, result.note_key)
     } else {
         Err(nostrdb::Error::NotFound)
     }
 }
 
 pub async fn find_note(
+    relay_pool: Arc<RelayPool>,
     ndb: Ndb,
-    keys: Keys,
     filters: Vec<nostr::Filter>,
     nip19: &Nip19,
 ) -> Result<()> {
     use nostr_sdk::JsonUtil;
 
-    let client = Client::builder().signer(keys).build();
-
-    let _ = client.add_relay("wss://relay.damus.io").await;
-    let _ = client.add_relay("wss://nostr.wine").await;
-    let _ = client.add_relay("wss://nos.lol").await;
-    let expected_events = filters.len();
-
-    let other_relays = nip19::nip19_relays(nip19);
-    for relay in other_relays {
-        let _ = client.add_relay(relay).await;
+    let mut relay_targets = nip19::nip19_relays(nip19);
+    if relay_targets.is_empty() {
+        relay_targets = relay_pool.default_relays().to_vec();
     }
 
-    client
-        .connect_with_timeout(timeout::get_env_timeout())
-        .await;
+    relay_pool.ensure_relays(relay_targets.clone()).await?;
 
     debug!("finding note(s) with filters: {:?}", filters);
 
-    let mut streamed_events = client
-        .stream_events(filters, Some(timeout::get_env_timeout()))
+    let expected_events = filters.len();
+
+    let mut streamed_events = relay_pool
+        .stream_events(
+            filters,
+            &relay_targets,
+            std::time::Duration::from_millis(2000),
+        )
         .await?;
 
     let mut num_loops = 0;
     while let Some(event) = streamed_events.next().await {
+        if let Err(err) = ensure_relay_hints(&relay_pool, &event).await {
+            warn!("failed to apply relay hints: {err}");
+        }
+
         debug!("processing event {:?}", event);
         if let Err(err) = ndb.process_event(&event.as_json()) {
             error!("error processing event: {err}");
@@ -338,6 +353,52 @@ pub async fn find_note(
         if num_loops == expected_events {
             break;
         }
+    }
+
+    Ok(())
+}
+
+pub async fn fetch_profile_feed(
+    relay_pool: Arc<RelayPool>,
+    ndb: Ndb,
+    pubkey: [u8; 32],
+) -> Result<()> {
+    let relay_targets = collect_profile_relays(relay_pool.clone(), ndb.clone(), pubkey).await?;
+
+    let relay_targets_arc = Arc::new(relay_targets);
+
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(
+            60 * 60 * 24 * PROFILE_FEED_LOOKBACK_DAYS,
+        ))
+        .and_then(|ts| ts.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|dur| dur.as_secs());
+
+    let mut fetched = stream_profile_feed_once(
+        relay_pool.clone(),
+        ndb.clone(),
+        relay_targets_arc.clone(),
+        pubkey,
+        cutoff,
+    )
+    .await?;
+
+    if fetched == 0 {
+        fetched = stream_profile_feed_once(
+            relay_pool.clone(),
+            ndb.clone(),
+            relay_targets_arc.clone(),
+            pubkey,
+            None,
+        )
+        .await?;
+    }
+
+    if fetched == 0 {
+        warn!(
+            "no profile notes fetched for {} even after fallback",
+            hex::encode(pubkey)
+        );
     }
 
     Ok(())
@@ -364,8 +425,40 @@ impl RenderData {
         };
     }
 
-    pub async fn complete(&mut self, ndb: Ndb, keys: Keys, nip19: Nip19) -> Result<()> {
-        let mut stream = {
+    fn hydrate_from_note_key(&mut self, ndb: &Ndb, note_key: NoteKey) -> Result<bool> {
+        let txn = Transaction::new(ndb)?;
+        let note = match ndb.get_note_by_key(&txn, note_key) {
+            Ok(note) => note,
+            Err(err) => {
+                debug!(?note_key, "note key not yet visible in transaction: {err}");
+                return Ok(false);
+            }
+        };
+
+        if note.kind() == 0 {
+            match ndb.get_profilekey_by_pubkey(&txn, note.pubkey()) {
+                Ok(profile_key) => self.set_profile_key(profile_key),
+                Err(err) => {
+                    debug!(
+                        pubkey = %hex::encode(note.pubkey()),
+                        "profile key not ready after note ingestion: {err}"
+                    );
+                }
+            }
+        } else {
+            self.set_note_key(note_key);
+        }
+
+        Ok(true)
+    }
+
+    pub async fn complete(
+        &mut self,
+        ndb: Ndb,
+        relay_pool: Arc<RelayPool>,
+        nip19: Nip19,
+    ) -> Result<()> {
+        let (mut stream, fetch_handle) = {
             let filter = renderdata_to_filter(self);
             if filter.is_empty() {
                 // should really never happen unless someone broke
@@ -378,57 +471,219 @@ impl RenderData {
 
             let filters = filter.iter().map(convert_filter).collect();
             let ndb = ndb.clone();
-            tokio::spawn(async move { find_note(ndb, keys, filters, &nip19).await });
-            stream
+            let pool = relay_pool.clone();
+            let handle = tokio::spawn(async move { find_note(pool, ndb, filters, &nip19).await });
+            (stream, handle)
         };
 
         let wait_for = Duration::from_secs(1);
-        let mut loops = 0;
+        let mut consecutive_timeouts = 0;
 
         loop {
-            if loops == 2 {
+            if !self.needs_note() && !self.needs_profile() {
                 break;
             }
 
-            let note_keys = if let Some(note_keys) = timeout(wait_for, stream.next()).await? {
-                note_keys
-            } else {
-                // end of stream?
+            if consecutive_timeouts >= 5 {
+                warn!("render completion timed out waiting for remaining data");
                 break;
+            }
+
+            let note_keys = match timeout(wait_for, stream.next()).await {
+                Ok(Some(note_keys)) => {
+                    consecutive_timeouts = 0;
+                    note_keys
+                }
+                Ok(None) => {
+                    // end of stream
+                    break;
+                }
+                Err(_) => {
+                    consecutive_timeouts += 1;
+                    continue;
+                }
             };
 
             let note_keys_len = note_keys.len();
 
-            {
-                let txn = Transaction::new(&ndb)?;
-
-                for note_key in note_keys {
-                    let note = if let Ok(note) = ndb.get_note_by_key(&txn, note_key) {
-                        note
-                    } else {
-                        error!("race condition in RenderData::complete?");
-                        continue;
-                    };
-
-                    if note.kind() == 0 {
-                        if let Ok(profile_key) = ndb.get_profilekey_by_pubkey(&txn, note.pubkey()) {
-                            self.set_profile_key(profile_key);
-                        }
-                    } else {
-                        self.set_note_key(note_key);
+            for note_key in note_keys {
+                match self.hydrate_from_note_key(&ndb, note_key) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // keep waiting; the outer loop will retry on the next batch
+                    }
+                    Err(err) => {
+                        error!(?note_key, "failed to hydrate note from key: {err}");
                     }
                 }
             }
 
-            if note_keys_len >= 2 {
+            if note_keys_len >= 2 && !self.needs_note() && !self.needs_profile() {
                 break;
             }
-
-            loops += 1;
         }
 
-        Ok(())
+        match fetch_handle.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(err),
+            Err(join_err) => Err(Error::Generic(format!(
+                "relay fetch task failed: {}",
+                join_err
+            ))),
+        }
     }
+}
+
+fn collect_relay_hints(event: &Event) -> Vec<RelayUrl> {
+    let mut relays = Vec::new();
+    for tag in event.tags.iter() {
+        let candidate = match tag.kind() {
+            TagKind::Relay | TagKind::Relays => tag.content(),
+            TagKind::SingleLetter(letter) if letter.as_char() == 'r' => tag.content(),
+            _ if event.kind == Kind::ContactList => {
+                if let Some(TagStandard::PublicKey {
+                    relay_url: Some(url),
+                    ..
+                }) = tag.as_standardized()
+                {
+                    Some(url.as_str())
+                } else {
+                    tag.as_slice().get(2).map(|value| value.as_str())
+                }
+            }
+            _ => None,
+        };
+
+        let Some(url) = candidate else {
+            continue;
+        };
+
+        if url.is_empty() {
+            continue;
+        }
+
+        match RelayUrl::parse(url) {
+            Ok(relay) => relays.push(relay),
+            Err(err) => warn!("ignoring invalid relay hint {}: {}", url, err),
+        }
+    }
+    relays
+}
+
+async fn ensure_relay_hints(relay_pool: &Arc<RelayPool>, event: &Event) -> Result<()> {
+    let hints = collect_relay_hints(event);
+    if hints.is_empty() {
+        return Ok(());
+    }
+    relay_pool.ensure_relays(hints).await
+}
+
+async fn collect_profile_relays(
+    relay_pool: Arc<RelayPool>,
+    ndb: Ndb,
+    pubkey: [u8; 32],
+) -> Result<Vec<RelayUrl>> {
+    relay_pool
+        .ensure_relays(relay_pool.default_relays().iter().cloned())
+        .await?;
+
+    let mut known: HashSet<String> = relay_pool
+        .default_relays()
+        .iter()
+        .map(|url| url.to_string())
+        .collect();
+    let mut targets = relay_pool.default_relays().to_vec();
+
+    let author_ref = [&pubkey];
+
+    let relay_filter = convert_filter(
+        &nostrdb::Filter::new()
+            .authors(author_ref)
+            .kinds([Kind::RelayList.as_u16() as u64])
+            .limit(1)
+            .build(),
+    );
+
+    let contact_filter = convert_filter(
+        &nostrdb::Filter::new()
+            .authors(author_ref)
+            .kinds([Kind::ContactList.as_u16() as u64])
+            .limit(1)
+            .build(),
+    );
+
+    let mut stream = relay_pool
+        .stream_events(
+            vec![relay_filter, contact_filter],
+            &[],
+            Duration::from_millis(2000),
+        )
+        .await?;
+    while let Some(event) = stream.next().await {
+        if let Err(err) = ndb.process_event(&event.as_json()) {
+            error!("error processing relay discovery event: {err}");
+        }
+
+        let hints = collect_relay_hints(&event);
+        if hints.is_empty() {
+            continue;
+        }
+
+        let mut fresh = Vec::new();
+        for hint in hints {
+            let key = hint.to_string();
+            if known.insert(key) {
+                targets.push(hint.clone());
+                fresh.push(hint);
+            }
+        }
+
+        if !fresh.is_empty() {
+            relay_pool.ensure_relays(fresh).await?;
+        }
+    }
+
+    Ok(targets)
+}
+
+async fn stream_profile_feed_once(
+    relay_pool: Arc<RelayPool>,
+    ndb: Ndb,
+    relays: Arc<Vec<RelayUrl>>,
+    pubkey: [u8; 32],
+    since: Option<u64>,
+) -> Result<usize> {
+    let filter = {
+        let author_ref = [&pubkey];
+        let mut builder = nostrdb::Filter::new()
+            .authors(author_ref)
+            .kinds([1])
+            .limit(PROFILE_FEED_RECENT_LIMIT as u64);
+
+        if let Some(since) = since {
+            builder = builder.since(since);
+        }
+
+        convert_filter(&builder.build())
+    };
+    let mut stream = relay_pool
+        .stream_events(vec![filter], &relays, Duration::from_millis(2000))
+        .await?;
+
+    let mut fetched = 0usize;
+
+    while let Some(event) = stream.next().await {
+        if let Err(err) = ensure_relay_hints(&relay_pool, &event).await {
+            warn!("failed to apply relay hints: {err}");
+        }
+        if let Err(err) = ndb.process_event(&event.as_json()) {
+            error!("error processing profile feed event: {err}");
+        } else {
+            fetched += 1;
+        }
+    }
+
+    Ok(fetched)
 }
 
 /// Attempt to locate the render data locally. Anything missing from
@@ -914,29 +1169,41 @@ mod tests {
             .sign_with_keys(&keys)
             .expect("sign long-form event with coordinate tag");
 
-        let wait_filter = Filter::new().ids([event_with_d.id.as_bytes()]).build();
-        let wait_filter_2 = Filter::new().ids([event_with_a_only.id.as_bytes()]).build();
+        let event_with_d_id = event_with_d.id.to_bytes();
+        let event_with_a_only_id = event_with_a_only.id.to_bytes();
+
+        let wait_filter = Filter::new()
+            .ids([&event_with_d_id, &event_with_a_only_id])
+            .limit(2)
+            .build();
+        let subscription = ndb
+            .subscribe(&[wait_filter])
+            .expect("subscribe for note ingestion");
 
         ndb.process_event(&serde_json::to_string(&event_with_d).unwrap())
             .expect("ingest event with d tag");
         ndb.process_event(&serde_json::to_string(&event_with_a_only).unwrap())
             .expect("ingest event with a tag");
 
-        let sub_id = ndb.subscribe(&[wait_filter, wait_filter_2]).expect("sub");
-        let _r = ndb.wait_for_notes(sub_id, 2).await;
+        let _ = ndb
+            .wait_for_notes(subscription, 2)
+            .await
+            .expect("wait for note ingestion to complete");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         {
             let txn = Transaction::new(&ndb).expect("transaction for d-tag lookup");
             let note = query_note_by_address(&ndb, &txn, &author, kind, identifier_with_d)
                 .expect("should find event by d tag");
-            assert_eq!(note.id(), event_with_d.id.as_bytes());
+            assert_eq!(note.id(), &event_with_d_id);
         }
 
         {
             let txn = Transaction::new(&ndb).expect("transaction for a-tag lookup");
             let note = query_note_by_address(&ndb, &txn, &author, kind, identifier_with_a)
                 .expect("should find event via a-tag fallback");
-            assert_eq!(note.id(), event_with_a_only.id.as_bytes());
+            assert_eq!(note.id(), &event_with_a_only_id);
         }
 
         drop(ndb);

@@ -7,8 +7,11 @@ use crate::{
 use ammonia::Builder as HtmlSanitizer;
 use http_body_util::Full;
 use hyper::{body::Bytes, header, Request, Response, StatusCode};
-use nostr_sdk::prelude::{Nip19, PublicKey, ToBech32};
-use nostrdb::{BlockType, Blocks, Filter, Mention, Ndb, Note, NoteKey, Transaction};
+use nostr::nips::nip19::Nip19Event;
+use nostr_sdk::prelude::{EventId, Nip19, PublicKey, RelayUrl, ToBech32};
+use nostrdb::{
+    BlockType, Blocks, Filter, Mention, Ndb, NdbProfile, Note, NoteKey, ProfileRecord, Transaction,
+};
 use pulldown_cmark::{html, Options, Parser};
 use std::fmt::Write as _;
 use std::io::Write;
@@ -315,14 +318,32 @@ pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct Profile<'a> {
+    pub key: PublicKey,
+    pub record: Option<ProfileRecord<'a>>,
+}
+
+impl<'a> Profile<'a> {
+    pub fn from_record(key: PublicKey, record: Option<ProfileRecord<'a>>) -> Self {
+        Self { key, record }
+    }
+}
+
+fn author_display_html(profile: Option<&ProfileRecord<'_>>) -> String {
+    let profile_name_raw = profile
+        .and_then(|p| p.record().profile())
+        .and_then(|p| p.name())
+        .unwrap_or("nostrich");
+    html_escape::encode_text(profile_name_raw).into_owned()
+}
+
 fn build_note_content_html(
     app: &Notecrumbs,
     note: &Note,
     txn: &Transaction,
-    author_display: &str,
-    pfp_url: &str,
-    timestamp_value: u64,
+    base_url: &str,
+    profile: &Profile<'_>,
+    relays: &[RelayUrl],
 ) -> String {
     let mut body_buf = Vec::new();
     if let Some(blocks) = note
@@ -334,21 +355,38 @@ fn build_note_content_html(
         let _ = write!(body_buf, "{}", html_escape::encode_text(note.content()));
     }
 
+    let author_display = author_display_html(profile.record.as_ref());
+    let npub = profile.key.to_bech32().unwrap();
     let note_body = String::from_utf8(body_buf).unwrap_or_default();
-    let pfp_attr = html_escape::encode_double_quoted_attribute(pfp_url);
-    let timestamp_attr = timestamp_value.to_string();
+    let pfp_attr = pfp_url_attr(
+        profile.record.as_ref().and_then(|r| r.record().profile()),
+        base_url,
+    );
+    let timestamp_attr = note.created_at().to_string();
+    let nevent = Nip19Event::new(
+        EventId::from_byte_array(note.id().to_owned()),
+        relays.iter().map(|r| r.to_string()),
+    );
+    let note_id = nevent.to_bech32().unwrap();
 
     format!(
         r#"<article class="damus-card damus-note">
             <header class="damus-note-header">
-               <img src="{pfp}" class="damus-note-avatar" alt="{author} profile picture" />
+               <a href="{base}/{npub}">
+                 <img src="{pfp}" class="damus-note-avatar" alt="{author} profile picture" />
+               </a>
                <div>
-                 <div class="damus-note-author">{author}</div>
-                 <time class="damus-note-time" data-timestamp="{ts}" datetime="{ts}" title="{ts}">{ts}</time>
+                 <a href="{base}/{npub}">
+                   <div class="damus-note-author">{author}</div>
+                 </a>
+                 <a href="{base}/{note_id}">
+                   <time class="damus-note-time" data-timestamp="{ts}" datetime="{ts}" title="{ts}">{ts}</time>
+                 </a>
                </div>
             </header>
             <div class="damus-note-body">{body}</div>
         </article>"#,
+        base = base_url,
         pfp = pfp_attr,
         author = author_display,
         ts = timestamp_attr,
@@ -358,17 +396,21 @@ fn build_note_content_html(
 
 #[allow(clippy::too_many_arguments)]
 fn build_article_content_html(
-    author_display: &str,
-    pfp_url: &str,
+    profile: &Profile<'_>,
     timestamp_value: u64,
     article_title_html: &str,
     hero_image: Option<&str>,
     summary_html: Option<&str>,
     article_body_html: &str,
     topics: &[String],
+    base_url: &str,
 ) -> String {
-    let pfp_attr = html_escape::encode_double_quoted_attribute(pfp_url);
+    let pfp_attr = pfp_url_attr(
+        profile.record.as_ref().and_then(|r| r.record().profile()),
+        base_url,
+    );
     let timestamp_attr = timestamp_value.to_string();
+    let author_display = author_display_html(profile.record.as_ref());
 
     let hero_markup = hero_image
         .filter(|url| !url.is_empty())
@@ -570,6 +612,25 @@ pub const DAMUS_PLATFORM_SCRIPT: &str = r#"
         </script>
 "#;
 
+fn pfp_url_attr(profile: Option<NdbProfile<'_>>, base_url: &str) -> String {
+    let pfp_url_raw = profile
+        .and_then(|profile| profile.picture())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("{base_url}/img/no-profile.svg"));
+    html_escape::encode_double_quoted_attribute(&pfp_url_raw).into_owned()
+}
+
+fn profile_not_found() -> Result<http::Response<http_body_util::Full<bytes::Bytes>>, http::Error> {
+    let mut data = Vec::new();
+    let _ = write!(data, "Profile not found :(");
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/html")
+        .status(StatusCode::NOT_FOUND)
+        .body(Full::new(Bytes::from(data)))
+}
+
 pub fn serve_profile_html(
     app: &Notecrumbs,
     nip: &Nip19,
@@ -578,12 +639,7 @@ pub fn serve_profile_html(
 ) -> Result<Response<Full<Bytes>>, Error> {
     let profile_key = match profile_rd {
         None | Some(ProfileRenderData::Missing(_)) => {
-            let mut data = Vec::new();
-            let _ = write!(data, "Profile not found :(");
-            return Ok(Response::builder()
-                .header(header::CONTENT_TYPE, "text/html")
-                .status(StatusCode::NOT_FOUND)
-                .body(Full::new(Bytes::from(data)))?);
+            return Ok(profile_not_found()?);
         }
 
         Some(ProfileRenderData::Profile(profile_key)) => *profile_key,
@@ -594,12 +650,7 @@ pub fn serve_profile_html(
     let profile_rec = match app.ndb.get_profile_by_key(&txn, profile_key) {
         Ok(profile_rec) => profile_rec,
         Err(_) => {
-            let mut data = Vec::new();
-            let _ = write!(data, "Profile not found :(");
-            return Ok(Response::builder()
-                .header(header::CONTENT_TYPE, "text/html")
-                .status(StatusCode::NOT_FOUND)
-                .body(Full::new(Bytes::from(data)))?);
+            return Ok(profile_not_found()?);
         }
     };
 
@@ -622,80 +673,87 @@ pub fn serve_profile_html(
         .map(str::trim)
         .filter(|about| !about.is_empty())
         .unwrap_or("");
+    let host = r
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("localhost:3000");
+    let base_url = format!("http://{host}");
+
+    let display_name_html = html_escape::encode_text(display_name_raw).into_owned();
+    let username_html = html_escape::encode_text(username_raw).into_owned();
+
     let pfp_url_raw = profile_data
         .and_then(|profile| profile.picture())
         .map(str::trim)
         .filter(|url| !url.is_empty())
         .unwrap_or("https://damus.io/img/no-profile.svg");
-
-    let display_name_html = html_escape::encode_text(display_name_raw).into_owned();
-    let username_html = html_escape::encode_text(username_raw).into_owned();
     let pfp_attr = html_escape::encode_double_quoted_attribute(pfp_url_raw).into_owned();
 
     let mut relay_entries = Vec::new();
-    let mut profile_pubkey: Option<[u8; 32]> = None;
     let profile_note_key = NoteKey::new(profile_record.note_key());
-    if let Ok(profile_note) = app.ndb.get_note_by_key(&txn, profile_note_key) {
-        let pubkey = *profile_note.pubkey();
-        profile_pubkey = Some(pubkey);
-        if let Ok(results) = app.ndb.query(
-            &txn,
-            &[Filter::new()
-                .authors([&pubkey])
-                .kinds([10002])
-                .limit(10)
-                .build()],
-            10,
-        ) {
-            let mut latest_event = None;
-            let mut latest_created_at = 0u64;
 
-            for result in &results {
-                let created_at = result.note.created_at();
-                if created_at >= latest_created_at {
-                    latest_created_at = created_at;
-                    latest_event = Some(&result.note);
-                }
+    let Ok(profile_note) = app.ndb.get_note_by_key(&txn, profile_note_key) else {
+        let mut data = Vec::new();
+        let _ = write!(data, "Profile not found :(");
+        return Ok(Response::builder()
+            .header(header::CONTENT_TYPE, "text/html")
+            .status(StatusCode::NOT_FOUND)
+            .body(Full::new(Bytes::from(data)))?);
+    };
+
+    /* relays */
+    if let Ok(results) = app.ndb.query(
+        &txn,
+        &[Filter::new()
+            .authors([profile_note.pubkey()])
+            .kinds([10002])
+            .limit(10)
+            .build()],
+        10,
+    ) {
+        let mut latest_event = None;
+        let mut latest_created_at = 0u64;
+
+        for result in &results {
+            let created_at = result.note.created_at();
+            if created_at >= latest_created_at {
+                latest_created_at = created_at;
+                latest_event = Some(&result.note);
             }
+        }
 
-            if let Some(relay_note) = latest_event {
-                for tag in relay_note.tags() {
-                    let mut iter = tag.into_iter();
-                    let Some(tag_kind) = iter.next().and_then(|item| item.variant().str()) else {
-                        continue;
-                    };
-                    if tag_kind != "r" {
-                        continue;
-                    }
-
-                    let Some(url) = iter.next().and_then(|item| item.variant().str()) else {
-                        continue;
-                    };
-                    let marker = iter.next().and_then(|item| item.variant().str());
-                    merge_relay_entry(&mut relay_entries, url, marker);
+        if let Some(relay_note) = latest_event {
+            for tag in relay_note.tags() {
+                let mut iter = tag.into_iter();
+                let Some(tag_kind) = iter.next().and_then(|item| item.variant().str()) else {
+                    continue;
+                };
+                if tag_kind != "r" {
+                    continue;
                 }
+
+                let Some(url) = iter.next().and_then(|item| item.variant().str()) else {
+                    continue;
+                };
+                let marker = iter.next().and_then(|item| item.variant().str());
+                merge_relay_entry(&mut relay_entries, url, marker);
             }
         }
     }
 
     let mut meta_rows = String::new();
-    if let Some(pubkey) = profile_pubkey.as_ref() {
-        if let Ok(pk) = PublicKey::from_slice(pubkey) {
-            if let Ok(npub) = pk.to_bech32() {
-                let npub_text = html_escape::encode_text(&npub).into_owned();
-                let npub_href = format!("nostr:{npub}");
-                let npub_href_attr =
-                    html_escape::encode_double_quoted_attribute(&npub_href).into_owned();
-                let _ = write!(
-                    meta_rows,
-                    r#"<div class="damus-profile-meta-row damus-profile-meta-row--npub"><span class="damus-meta-icon" aria-hidden="true">{icon}</span><a href="{href}">{value}</a><span class="damus-sr-only">npub</span></div>"#,
-                    icon = ICON_KEY_CIRCLE,
-                    href = npub_href_attr,
-                    value = npub_text
-                );
-            }
-        }
-    }
+
+    let profile_bech32 = nip.to_bech32().unwrap_or_default();
+    let npub_href = format!("nostr:{profile_bech32}");
+    let npub_href_attr = html_escape::encode_double_quoted_attribute(&npub_href).into_owned();
+    let _ = write!(
+        meta_rows,
+        r#"<div class="damus-profile-meta-row damus-profile-meta-row--npub"><span class="damus-meta-icon" aria-hidden="true">{icon}</span><a href="{href}">{value}</a><span class="damus-sr-only">npub</span></div>"#,
+        icon = ICON_KEY_CIRCLE,
+        href = npub_href_attr,
+        value = profile_bech32
+    );
 
     if let Some(nip05) = profile_data
         .and_then(|profile| profile.nip05())
@@ -755,63 +813,48 @@ pub fn serve_profile_html(
         )
     };
 
+    let profile = Profile::from_record(
+        PublicKey::from_slice(profile_note.pubkey()).unwrap(),
+        Some(profile_rec),
+    );
     let mut recent_notes_html = String::new();
-    if let Some(pubkey) = profile_pubkey.as_ref() {
-        let notes_filter = Filter::new()
-            .authors([pubkey])
-            .kinds([1])
-            .limit(PROFILE_FEED_RECENT_LIMIT as u64)
-            .build();
 
-        match app
-            .ndb
-            .query(&txn, &[notes_filter], PROFILE_FEED_RECENT_LIMIT as i32)
-        {
-            Ok(mut note_results) => {
-                if note_results.is_empty() {
-                    recent_notes_html.push_str(
-                        r#"<section class="damus-section"><h2 class="damus-section-title">Recent Notes</h2><div class="damus-card"><p class="damus-supporting muted">No recent notes yet.</p></div></section>"#,
+    let notes_filter = Filter::new()
+        .authors([profile_note.pubkey()])
+        .kinds([1])
+        .limit(PROFILE_FEED_RECENT_LIMIT as u64)
+        .build();
+
+    match app
+        .ndb
+        .query(&txn, &[notes_filter], PROFILE_FEED_RECENT_LIMIT as i32)
+    {
+        Ok(mut note_results) => {
+            if note_results.is_empty() {
+                recent_notes_html.push_str(
+                    r#"<section class="damus-section"><h2 class="damus-section-title">Recent Notes</h2><div class="damus-card"><p class="damus-supporting muted">No recent notes yet.</p></div></section>"#,
+                );
+            } else {
+                note_results.sort_by_key(|result| result.note.created_at());
+                note_results.reverse();
+                recent_notes_html
+                    .push_str(r#"<section class="damus-section"><h2 class="damus-section-title">Recent Notes</h2>"#);
+                for result in note_results.into_iter().take(PROFILE_FEED_RECENT_LIMIT) {
+                    let note_html = build_note_content_html(
+                        app,
+                        &result.note,
+                        &txn,
+                        &base_url,
+                        &profile,
+                        &crate::nip19::nip19_relays(nip),
                     );
-                } else {
-                    note_results.sort_by_key(|result| result.note.created_at());
-                    note_results.reverse();
-                    recent_notes_html
-                        .push_str(r#"<section class="damus-section"><h2 class="damus-section-title">Recent Notes</h2>"#);
-                    for result in note_results.into_iter().take(PROFILE_FEED_RECENT_LIMIT) {
-                        let timestamp_attr = result.note.created_at().to_string();
-                        let note_body =
-                            if let Ok(blocks) = app.ndb.get_blocks_by_key(&txn, result.note_key) {
-                                let mut buf = Vec::new();
-                                render_note_content(&mut buf, &result.note, &blocks);
-                                String::from_utf8(buf).unwrap_or_default()
-                            } else {
-                                html_escape::encode_text(result.note.content()).into_owned()
-                            };
-
-                        let _ = write!(
-                            recent_notes_html,
-                            r#"<article class="damus-card damus-note">
-                                  <header class="damus-note-header">
-                                    <img src="{pfp}" class="damus-note-avatar" alt="{display} profile picture" />
-                                    <div>
-                                      <div class="damus-note-author">{display}</div>
-                                      <time class="damus-note-time" data-timestamp="{ts}" datetime="{ts}" title="{ts}">{ts}</time>
-                                    </div>
-                                  </header>
-                                  <div class="damus-note-body">{body}</div>
-                                </article>"#,
-                            pfp = pfp_attr.as_str(),
-                            display = display_name_html.as_str(),
-                            ts = timestamp_attr,
-                            body = note_body
-                        );
-                    }
-                    recent_notes_html.push_str("</section>");
+                    recent_notes_html.push_str(&note_html);
                 }
+                recent_notes_html.push_str("</section>");
             }
-            Err(err) => {
-                warn!("failed to query recent notes: {err}");
-            }
+        }
+        Err(err) => {
+            warn!("failed to query recent notes: {err}");
         }
     }
 
@@ -1097,12 +1140,11 @@ pub fn serve_note_html(
     let profile_name_raw = profile_data
         .and_then(|profile| profile.name())
         .unwrap_or("nostrich");
-    let profile_name_html = html_escape::encode_text(profile_name_raw).into_owned();
 
-    let default_pfp_url = "/assets/default_pfp.jpg";
-    let pfp_url_raw = profile_data
-        .and_then(|profile| profile.picture())
-        .unwrap_or(default_pfp_url);
+    let profile = Profile::from_record(
+        nostr_sdk::PublicKey::from_slice(note.pubkey()).unwrap(),
+        profile_record,
+    );
 
     let host = r
         .headers()
@@ -1110,16 +1152,15 @@ pub fn serve_note_html(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("localhost:3000");
     let base_url = format!("http://{}", host);
-    let bech32 = nip19.to_bech32().unwrap();
-    let canonical_url = format!("{}/{}", base_url, bech32);
-    let fallback_image_url = format!("{}/{}.png", base_url, bech32);
+    let note_bech32 = nip19.to_bech32().unwrap();
+    let canonical_url = format!("{}/{}", base_url, note_bech32);
+    let fallback_image_url = format!("{}/{}.png", base_url, note_bech32);
 
     let mut display_title_raw = profile_name_raw.to_string();
     let mut og_description_raw = collapse_whitespace(abbreviate(note.content(), 64));
     let mut og_image_url_raw = fallback_image_url.clone();
     let mut timestamp_value = note.created_at();
     let mut og_type = "website";
-    let author_display_html = profile_name_html.clone();
 
     let main_content_html = if matches!(note.kind(), 30023 | 30024) {
         og_type = "article";
@@ -1168,23 +1209,23 @@ pub fn serve_note_html(
         let article_body_html = render_markdown(note.content());
 
         build_article_content_html(
-            author_display_html.as_str(),
-            pfp_url_raw,
+            &profile,
             timestamp_value,
             &article_title_html,
             image.as_deref(),
             summary_display_html.as_deref(),
             &article_body_html,
             &topics,
+            &base_url,
         )
     } else {
         build_note_content_html(
             app,
             &note,
             &txn,
-            author_display_html.as_str(),
-            pfp_url_raw,
-            timestamp_value,
+            &base_url,
+            &profile,
+            &crate::nip19::nip19_relays(nip19),
         )
     };
 
@@ -1264,7 +1305,7 @@ pub fn serve_note_html(
         canonical_url = canonical_url_attr,
         og_type = og_type,
         main_content = main_content_html,
-        bech32 = bech32,
+        bech32 = note_bech32,
         scripts = scripts,
     );
 

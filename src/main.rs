@@ -331,11 +331,9 @@ async fn serve(
     } else if is_json {
         match render_data {
             RenderData::Note(note_rd) => html::serve_note_json(&app.ndb, &note_rd),
-            RenderData::Profile(_profile_rd) => {
-                return Ok(Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body(Full::new(Bytes::from("todo: profile json")))?);
-            }
+            RenderData::Profile(_profile_rd) => Ok(Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Full::new(Bytes::from("todo: profile json")))?),
         }
     } else {
         match render_data {

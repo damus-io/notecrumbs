@@ -13,7 +13,7 @@ use nostr::event::{
     tag::{TagKind, TagStandard},
 };
 use nostr::nips::nip01::Coordinate;
-use nostr::types::{RelayUrl, SingleLetterTag, Timestamp};
+use nostr::{RelayUrl, SingleLetterTag, Timestamp};
 use nostr_sdk::async_utility::futures_util::StreamExt;
 use nostr_sdk::nips::nip19::Nip19;
 use nostr_sdk::prelude::{Event, EventId, PublicKey};
@@ -199,8 +199,8 @@ fn renderdata_to_filter(render_data: &RenderData) -> Vec<nostrdb::Filter> {
     filters
 }
 
-pub(crate) fn convert_filter(ndb_filter: &nostrdb::Filter) -> nostr::types::Filter {
-    let mut filter = nostr::types::Filter::new();
+pub(crate) fn convert_filter(ndb_filter: &nostrdb::Filter) -> nostr::Filter {
+    let mut filter = nostr::Filter::new();
 
     for element in ndb_filter {
         match element {

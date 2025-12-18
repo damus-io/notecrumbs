@@ -220,12 +220,38 @@ pub fn serve_note_json(
         .body(Full::new(Bytes::from(body)))?)
 }
 
+fn ends_with(haystack: &str, needle: &str) -> bool {
+    haystack.len() >= needle.len()
+        && haystack[haystack.len() - needle.len()..].eq_ignore_ascii_case(needle)
+}
+
+fn is_image(url: &str) -> bool {
+    const IMAGES: [&str; 10] = [
+        "jpg", "jpeg", "png", "gif", "webp", "svg", "avif", "bmp", "ico", "apng",
+    ];
+
+    // Strip query string and fragment: ?foo=1#bar
+    let base = url
+        .split_once('?')
+        .map(|(s, _)| s)
+        .unwrap_or(url)
+        .split_once('#')
+        .map(|(s, _)| s)
+        .unwrap_or(url);
+
+    IMAGES.iter().any(|ext| ends_with(base, ext))
+}
+
 pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
     for block in blocks.iter(note) {
         match block.blocktype() {
             BlockType::Url => {
                 let url = html_escape::encode_text(block.as_str());
-                let _ = write!(body, r#"<a href="{}">{}</a>"#, url, url);
+                if is_image(&url) {
+                    let _ = write!(body, r#"<img src="{}">"#, url);
+                } else {
+                    let _ = write!(body, r#"<a href="{}">{}</a>"#, url, url);
+                }
             }
 
             BlockType::Hashtag => {

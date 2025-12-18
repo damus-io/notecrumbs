@@ -2,5 +2,5 @@
 
 with pkgs;
 mkShell {
-  nativeBuildInputs = [ libiconv pkg-config fontconfig freetype openssl ];
+  nativeBuildInputs = [ rustc cargo libiconv pkg-config fontconfig freetype openssl ];
 }

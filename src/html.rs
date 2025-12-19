@@ -511,11 +511,7 @@ fn extract_quote_refs_from_content(note: &Note, blocks: &Blocks) -> Vec<QuoteRef
                 let bech32_str = block.as_str();
                 // Parse to get relay hints from nevent
                 if let Ok(Nip19::Event(ev)) = Nip19::from_bech32(bech32_str) {
-                    let relays: Vec<RelayUrl> = ev
-                        .relays
-                        .iter()
-                        .filter_map(|s| RelayUrl::parse(s).ok())
-                        .collect();
+                    let relays: Vec<RelayUrl> = ev.relays.to_vec();
                     quotes.push(QuoteRef::Event {
                         id: *ev.event_id.as_bytes(),
                         bech32: Some(bech32_str.to_string()),
@@ -596,11 +592,7 @@ fn extract_quote_refs_from_tags(note: &Note) -> Vec<QuoteRef> {
                 match nip19 {
                     Nip19::Event(ev) => {
                         // Combine relays from nevent with q tag relay hint
-                        let mut relays: Vec<RelayUrl> = ev
-                            .relays
-                            .iter()
-                            .filter_map(|s| RelayUrl::parse(s).ok())
-                            .collect();
+                        let mut relays: Vec<RelayUrl> = ev.relays.to_vec();
                         if let Some(hint) = &tag_relay_hint {
                             if !relays.contains(hint) {
                                 relays.push(hint.clone());
@@ -752,10 +744,10 @@ fn build_quote_link(quote_ref: &QuoteRef) -> String {
             if let Some(b) = bech32 {
                 return format!("/{}", b);
             }
-            if let Ok(eid) = EventId::from_slice(id) {
-                if let Ok(b) = eid.to_bech32() {
-                    return format!("/{}", b);
-                }
+            if let Ok(b) =
+                EventId::from_slice(id).map(|eid| eid.to_bech32().expect("infallible apparently"))
+            {
+                return format!("/{}", b);
             }
         }
         QuoteRef::Article { addr, bech32, .. } => {
@@ -1093,10 +1085,8 @@ fn build_note_content_html(
         base_url,
     );
     let timestamp_attr = note.created_at().to_string();
-    let nevent = Nip19Event::new(
-        EventId::from_byte_array(note.id().to_owned()),
-        relays.iter().map(|r| r.to_string()),
-    );
+    let nevent = Nip19Event::new(EventId::from_byte_array(note.id().to_owned()))
+        .relays(relays.iter().cloned());
     let note_id = nevent.to_bech32().unwrap();
 
     // Extract quote refs from q tags and inline mentions
@@ -1370,9 +1360,7 @@ fn build_note_source_link(event_id: &[u8; 32]) -> String {
     let Ok(id) = EventId::from_slice(event_id) else {
         return String::new();
     };
-    let Ok(nevent) = id.to_bech32() else {
-        return String::new();
-    };
+    let nevent = id.to_bech32().expect("infallible");
 
     let href_raw = format!("/{nevent}");
     let href = html_escape::encode_double_quoted_attribute(&href_raw);
@@ -2067,7 +2055,22 @@ pub fn serve_note_html(
         profile_record,
     );
 
-    let note_bech32 = nip19.to_bech32().unwrap();
+    // Generate bech32 with source relay hints for better discoverability.
+    // This applies to all event types (notes, articles, highlights).
+    // Falls back to original nip19 encoding if relay-enhanced encoding fails.
+    let note_bech32 = match crate::nip19::bech32_with_relays(nip19, &note_rd.source_relays) {
+        Some(bech32) => bech32,
+        None => {
+            warn!(
+                "failed to encode bech32 with relays for nip19: {:?}, falling back to original",
+                nip19
+            );
+            metrics::counter!("bech32_encode_fallback_total", 1);
+            nip19
+                .to_bech32()
+                .map_err(|e| Error::Generic(format!("failed to encode nip19: {}", e)))?
+        }
+    };
     let base_url = get_base_url();
     let canonical_url = format!("{}/{}", base_url, note_bech32);
     let fallback_image_url = format!("{}/{}.png", base_url, note_bech32);
@@ -2171,14 +2174,13 @@ pub fn serve_note_html(
         )
     } else {
         // Regular notes (kind 1, etc.)
-        build_note_content_html(
-            app,
-            &note,
-            &txn,
-            &base_url,
-            &profile,
-            &crate::nip19::nip19_relays(nip19),
-        )
+        // Use source relays from fetch if available, otherwise fall back to nip19 relay hints
+        let relays = if note_rd.source_relays.is_empty() {
+            crate::nip19::nip19_relays(nip19)
+        } else {
+            note_rd.source_relays.clone()
+        };
+        build_note_content_html(app, &note, &txn, &base_url, &profile, &relays)
     };
 
     if og_description_raw.is_empty() {

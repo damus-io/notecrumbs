@@ -858,14 +858,22 @@ fn build_embedded_quotes_html(
         };
 
         // Get author profile for the quoted note (name, username, pfp)
+        // Filter out empty strings to ensure proper fallback behavior
         let (display_name, username, pfp_url) = ndb
             .get_profile_by_pubkey(txn, quoted_note.pubkey())
             .ok()
             .and_then(|profile_rec| {
                 profile_rec.record().profile().map(|p| {
-                    let name = p.display_name().or_else(|| p.name()).map(|n| n.to_owned());
-                    let handle = p.name().map(|n| format!("@{}", n));
-                    let picture = p.picture().map(|s| s.to_owned());
+                    let name = p.display_name()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| p.name().filter(|s| !s.is_empty()))
+                        .map(|n| n.to_owned());
+                    let handle = p.name()
+                        .filter(|s| !s.is_empty())
+                        .map(|n| format!("@{}", n));
+                    let picture = p.picture()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_owned());
                     (name, handle, picture)
                 })
             })
@@ -906,8 +914,8 @@ fn build_embedded_quotes_html(
             ))
             .unwrap_or_default();
 
-        // Build content preview based on note kind
-        let (content_preview, is_truncated) = match quoted_note.kind() {
+        // Build content preview and type indicator based on note kind
+        let (content_preview, is_truncated, type_indicator) = match quoted_note.kind() {
             // For articles, show title instead of body content
             30023 | 30024 => {
                 let mut title: Option<&str> = None;
@@ -921,21 +929,26 @@ fn build_embedded_quotes_html(
                         break;
                     }
                 }
-                (title.unwrap_or("Untitled article").to_string(), false)
+                let indicator = if quoted_note.kind() == 30024 {
+                    r#"<span class="damus-embedded-quote-type damus-embedded-quote-type-draft">Draft</span>"#
+                } else {
+                    r#"<span class="damus-embedded-quote-type">Article</span>"#
+                };
+                (title.unwrap_or("Untitled article").to_string(), false, indicator)
             }
             // For highlights, show the highlighted text
             9802 => {
                 let full_content = quoted_note.content();
                 let content = abbreviate(full_content, 200);
                 let truncated = content.len() < full_content.len();
-                (format!("\"{}\"", content), truncated)
+                (format!("\"{}\"", content), truncated, r#"<span class="damus-embedded-quote-type">Highlight</span>"#)
             }
             // For regular notes, show abbreviated content
             _ => {
                 let full_content = quoted_note.content();
                 let content = abbreviate(full_content, 280);
                 let truncated = content.len() < full_content.len();
-                (content.to_string(), truncated)
+                (content.to_string(), truncated, "")
             }
         };
         let content_html = html_escape::encode_text(&content_preview).replace("\n", " ");
@@ -960,6 +973,7 @@ fn build_embedded_quotes_html(
                     {pfp}
                     <span class="damus-embedded-quote-author">{name}</span>{username}
                     <span class="damus-embedded-quote-time">· {time}</span>
+                    {type_indicator}
                 </div>
                 {reply}
                 <div class="damus-embedded-quote-content">{content} {showmore}</div>
@@ -970,6 +984,7 @@ fn build_embedded_quotes_html(
             name = display_name_html,
             username = username_html,
             time = time_html,
+            type_indicator = type_indicator,
             reply = reply_html,
             content = content_html,
             showmore = show_more_html,

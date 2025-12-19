@@ -555,6 +555,23 @@ a:hover {
   font-size: 0.85rem;
 }
 
+.damus-embedded-quote-type {
+  background: rgba(189, 102, 255, 0.2);
+  color: var(--damus-accent);
+  padding: 0.15em 0.5em;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-left: 0.5rem;
+}
+
+.damus-embedded-quote-type-draft {
+  background: rgba(255, 107, 53, 0.2);
+  color: #ff6b35;
+}
+
 .damus-embedded-quote-reply {
   color: var(--damus-muted);
   font-size: 0.8rem;

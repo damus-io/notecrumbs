@@ -1,6 +1,6 @@
 use crate::Error;
 use nostr::prelude::RelayUrl;
-use nostr_sdk::prelude::{Client, Event, Filter, Keys, ReceiverStream};
+use nostr_sdk::prelude::{BoxedStream, Client, Filter, Keys, RelayEvent};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -21,16 +21,11 @@ pub struct RelayPool {
     client: Client,
     known_relays: Arc<Mutex<HashSet<String>>>,
     default_relays: Arc<[RelayUrl]>,
-    connect_timeout: Duration,
     stats: Arc<Mutex<RelayStats>>,
 }
 
 impl RelayPool {
-    pub async fn new(
-        keys: Keys,
-        default_relays: &[&str],
-        connect_timeout: Duration,
-    ) -> Result<Self, Error> {
+    pub async fn new(keys: Keys, default_relays: &[&str]) -> Result<Self, Error> {
         let client = Client::builder().signer(keys).build();
         let parsed_defaults: Vec<RelayUrl> = default_relays
             .iter()
@@ -48,7 +43,6 @@ impl RelayPool {
             client,
             known_relays: Arc::new(Mutex::new(HashSet::new())),
             default_relays: default_relays.clone(),
-            connect_timeout,
             stats: Arc::new(Mutex::new(RelayStats::default())),
         };
 
@@ -110,7 +104,7 @@ impl RelayPool {
         }
 
         if had_new {
-            self.client.connect_with_timeout(self.connect_timeout).await;
+            self.client.connect().await;
 
             let mut stats = self.stats.lock().await;
             stats.ensure_calls += 1;
@@ -147,19 +141,23 @@ impl RelayPool {
         Ok(())
     }
 
+    /// Stream events from relays, returning RelayEvent which includes source relay URL.
+    /// Takes a single Filter - callers should combine filters before calling.
     pub async fn stream_events(
         &self,
-        filters: Vec<Filter>,
+        filter: Filter,
         relays: &[RelayUrl],
         timeout: Duration,
-    ) -> Result<ReceiverStream<Event>, Error> {
+    ) -> Result<BoxedStream<RelayEvent>, Error> {
         if relays.is_empty() {
-            Ok(self.client.stream_events(filters, Some(timeout)).await?)
-        } else {
-            let urls: Vec<String> = relays.iter().map(|r| r.to_string()).collect();
             Ok(self
                 .client
-                .stream_events_from(urls, filters, Some(timeout))
+                .stream_events_with_source(filter, timeout)
+                .await?)
+        } else {
+            Ok(self
+                .client
+                .stream_events_from_with_source(relays.to_vec(), filter, timeout)
                 .await?)
         }
     }

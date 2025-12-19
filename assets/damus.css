@@ -258,6 +258,13 @@ a:hover {
   color: #ffffff;
 }
 
+.damus-note-handle {
+  display: block;
+  font-size: 0.95rem;
+  font-weight: 400;
+  color: var(--damus-muted);
+}
+
 .damus-note-time {
   font-size: 0.9rem;
   color: var(--damus-muted);

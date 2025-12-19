@@ -509,15 +509,24 @@ pub fn render_note_content(
 fn lookup_profile_name(ndb: &Ndb, txn: &Transaction, pubkey: &[u8; 32]) -> Option<String> {
     let profile_rec = ndb.get_profile_by_pubkey(txn, pubkey).ok()?;
     let profile = profile_rec.record().profile()?;
-    profile.display_name().or_else(|| profile.name()).map(|s| s.to_owned())
+    // Prefer display_name, fall back to name. Filter out empty strings.
+    profile
+        .display_name()
+        .filter(|s| !s.is_empty())
+        .or_else(|| profile.name().filter(|s| !s.is_empty()))
+        .map(|s| s.to_owned())
 }
 
 /// Looks up a profile and returns "@username" format for reply context (matches iOS Damus style).
 fn lookup_profile_handle(ndb: &Ndb, txn: &Transaction, pubkey: &[u8; 32]) -> Option<String> {
     let profile_rec = ndb.get_profile_by_pubkey(txn, pubkey).ok()?;
     let profile = profile_rec.record().profile()?;
-    // Prefer the username/handle (name field), fall back to display_name
-    profile.name().or_else(|| profile.display_name()).map(|s| format!("@{}", s))
+    // Prefer the username/handle (name field), fall back to display_name. Filter out empty strings.
+    profile
+        .name()
+        .filter(|s| !s.is_empty())
+        .or_else(|| profile.display_name().filter(|s| !s.is_empty()))
+        .map(|s| format!("@{}", s))
 }
 
 /// Parses a hex string into a 32-byte array. Returns None on invalid input.
@@ -1068,6 +1077,20 @@ fn author_display_html(profile: Option<&ProfileRecord<'_>>) -> String {
     html_escape::encode_text(profile_name_raw).into_owned()
 }
 
+/// Returns the @username handle markup if available, empty string otherwise.
+/// Uses profile.name() (the NIP-01 "name" field) as the handle.
+fn author_handle_html(profile: Option<&ProfileRecord<'_>>) -> String {
+    profile
+        .and_then(|p| p.record().profile())
+        .and_then(|p| p.name())
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            let escaped = html_escape::encode_text(name);
+            format!(r#"<span class="damus-note-handle">@{}</span>"#, escaped)
+        })
+        .unwrap_or_default()
+}
+
 fn build_note_content_html(
     app: &Notecrumbs,
     note: &Note,
@@ -1088,6 +1111,7 @@ fn build_note_content_html(
     }
 
     let author_display = author_display_html(profile.record.as_ref());
+    let author_handle = author_handle_html(profile.record.as_ref());
     let npub = profile.key.to_bech32().unwrap();
     let note_body = String::from_utf8(body_buf).unwrap_or_default();
     let pfp_attr = pfp_url_attr(
@@ -1133,6 +1157,7 @@ fn build_note_content_html(
                <div>
                  <a href="{base}/{npub}">
                    <div class="damus-note-author">{author}</div>
+                   {handle}
                  </a>
                  <a href="{base}/{note_id}">
                    <time class="damus-note-time" data-timestamp="{ts}" datetime="{ts}" title="{ts}">{ts}</time>
@@ -1145,6 +1170,7 @@ fn build_note_content_html(
         base = base_url,
         pfp = pfp_attr,
         author = author_display,
+        handle = author_handle,
         ts = timestamp_attr,
         body = note_body,
         quotes = quotes_html
@@ -1169,6 +1195,7 @@ fn build_article_content_html(
     );
     let timestamp_attr = timestamp_value.to_string();
     let author_display = author_display_html(profile.record.as_ref());
+    let author_handle = author_handle_html(profile.record.as_ref());
 
     let hero_markup = hero_image
         .filter(|url| !url.is_empty())
@@ -1215,6 +1242,7 @@ fn build_article_content_html(
                <img src="{pfp}" class="damus-note-avatar" alt="{author} profile picture" />
                <div>
                  <div class="damus-note-author">{author}</div>
+                 {handle}
                  <time class="damus-note-time" data-timestamp="{ts}" datetime="{ts}" title="{ts}">{ts}</time>
                </div>
             </header>
@@ -1226,6 +1254,7 @@ fn build_article_content_html(
         </article>"#,
         pfp = pfp_attr,
         author = author_display,
+        handle = author_handle,
         ts = timestamp_attr,
         title = article_title_html,
         draft = draft_markup,
@@ -1250,6 +1279,7 @@ fn build_highlight_content_html(
     source_markup: &str,
 ) -> String {
     let author_display = author_display_html(profile.record.as_ref());
+    let author_handle = author_handle_html(profile.record.as_ref());
     let pfp_attr = pfp_url_attr(
         profile.record.as_ref().and_then(|r| r.record().profile()),
         base_url,
@@ -1274,6 +1304,7 @@ fn build_highlight_content_html(
                <img src="{pfp}" class="damus-note-avatar" alt="{author} profile picture" />
                <div>
                  <div class="damus-note-author">{author}</div>
+                 {handle}
                  <time class="damus-note-time" data-timestamp="{ts}" datetime="{ts}" title="{ts}">{ts}</time>
                </div>
             </header>
@@ -1284,6 +1315,7 @@ fn build_highlight_content_html(
         </article>"#,
         pfp = pfp_attr,
         author = author_display,
+        handle = author_handle,
         ts = timestamp_attr,
         comment = comment_markup,
         highlight = highlight_text_html,

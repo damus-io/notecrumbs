@@ -347,6 +347,9 @@ pub async fn find_note(
 
     let mut all_source_relays = Vec::new();
     let default_relays = relay_pool.default_relays();
+    let mut success_relays: HashSet<String> = HashSet::new();
+    let mut error_relays: HashSet<String> = HashSet::new();
+    let mut last_error: Option<String> = None;
 
     for filter in filters {
         let mut streamed_events = relay_pool
@@ -358,31 +361,50 @@ pub async fn find_note(
             .await?;
 
         // Collect all responding relays, then prioritize after stream exhausts.
-        while let Some(relay_event) = streamed_events.next().await {
-            if let Err(err) = ensure_relay_hints(&relay_pool, &relay_event.event).await {
+        while let Some((relay_url, result)) = streamed_events.next().await {
+            let event = match result {
+                Ok(e) => e,
+                Err(err) => {
+                    warn!("relay {relay_url} stream error: {err}");
+                    error_relays.insert(relay_url.to_string());
+                    last_error = Some(format!("{relay_url}: {err}"));
+                    continue;
+                }
+            };
+
+            success_relays.insert(relay_url.to_string());
+
+            if let Err(err) = ensure_relay_hints(&relay_pool, &event).await {
                 warn!("failed to apply relay hints: {err}");
             }
 
-            debug!("processing event {:?}", relay_event.event);
-            if let Err(err) = ndb.process_event(&relay_event.event.as_json()) {
+            debug!("processing event {:?}", event);
+            if let Err(err) = ndb.process_event(&event.as_json()) {
                 error!("error processing event: {err}");
             }
 
             // Skip profile events - their relays shouldn't be used as note hints
-            if relay_event.event.kind == Kind::Metadata {
+            if event.kind == Kind::Metadata {
                 continue;
             }
 
-            let Some(relay_url) = relay_event.relay_url() else {
-                continue;
-            };
-
-            if all_source_relays.contains(relay_url) {
+            if all_source_relays.contains(&relay_url) {
                 continue;
             }
 
-            all_source_relays.push(relay_url.clone());
+            all_source_relays.push(relay_url);
         }
+    }
+
+    // Only fail if no relay succeeded AND every distinct targeted relay errored
+    let unique_targets: HashSet<String> = relay_targets.iter().map(|r| r.to_string()).collect();
+    let target_count = unique_targets.len();
+    let all_relays_failed = success_relays.is_empty()
+        && error_relays.len() >= target_count
+        && target_count > 0;
+
+    if let (true, Some(err)) = (all_relays_failed, last_error) {
+        return Err(Error::Generic(format!("all relays failed: {err}")));
     }
 
     // Sort relays: default relays first (more reliable), then others.
@@ -662,17 +684,31 @@ async fn collect_profile_relays(
     );
 
     // Process each filter separately since stream_events now takes a single filter
+    let mut success_relays: HashSet<String> = HashSet::new();
+    let mut error_count = 0usize;
+
     for filter in [relay_filter, contact_filter] {
         let mut stream = relay_pool
             .stream_events(filter, &[], Duration::from_millis(2000))
             .await?;
 
-        while let Some(relay_event) = stream.next().await {
-            if let Err(err) = ndb.process_event(&relay_event.event.as_json()) {
+        while let Some((relay_url, result)) = stream.next().await {
+            let event = match result {
+                Ok(e) => e,
+                Err(err) => {
+                    warn!("relay {relay_url} stream error: {err}");
+                    error_count += 1;
+                    continue;
+                }
+            };
+
+            success_relays.insert(relay_url.to_string());
+
+            if let Err(err) = ndb.process_event(&event.as_json()) {
                 error!("error processing relay discovery event: {err}");
             }
 
-            let hints = collect_relay_hints(&relay_event.event);
+            let hints = collect_relay_hints(&event);
             if hints.is_empty() {
                 continue;
             }
@@ -690,6 +726,14 @@ async fn collect_profile_relays(
                 relay_pool.ensure_relays(fresh).await?;
             }
         }
+    }
+
+    // Warn if no relay succeeded but we had errors (still return defaults)
+    if success_relays.is_empty() && error_count > 0 {
+        warn!(
+            "no successful relay responses during profile relay discovery ({} errors), using defaults",
+            error_count
+        );
     }
 
     Ok(targets)
@@ -720,16 +764,42 @@ async fn stream_profile_feed_once(
         .await?;
 
     let mut fetched = 0usize;
+    let mut success_relays: HashSet<String> = HashSet::new();
+    let mut error_relays: HashSet<String> = HashSet::new();
+    let mut last_error: Option<String> = None;
 
-    while let Some(relay_event) = stream.next().await {
-        if let Err(err) = ensure_relay_hints(&relay_pool, &relay_event.event).await {
+    while let Some((relay_url, result)) = stream.next().await {
+        let event = match result {
+            Ok(e) => e,
+            Err(err) => {
+                warn!("relay {relay_url} stream error: {err}");
+                error_relays.insert(relay_url.to_string());
+                last_error = Some(format!("{relay_url}: {err}"));
+                continue;
+            }
+        };
+
+        success_relays.insert(relay_url.to_string());
+
+        if let Err(err) = ensure_relay_hints(&relay_pool, &event).await {
             warn!("failed to apply relay hints: {err}");
         }
-        if let Err(err) = ndb.process_event(&relay_event.event.as_json()) {
+        if let Err(err) = ndb.process_event(&event.as_json()) {
             error!("error processing profile feed event: {err}");
         } else {
             fetched += 1;
         }
+    }
+
+    // Only fail if no relay succeeded AND every distinct targeted relay errored
+    let unique_targets: HashSet<String> = relays.iter().map(|r| r.to_string()).collect();
+    let target_count = unique_targets.len();
+    let all_relays_failed = success_relays.is_empty()
+        && error_relays.len() >= target_count
+        && target_count > 0;
+
+    if let (true, Some(err)) = (all_relays_failed, last_error) {
+        return Err(Error::Generic(format!("all relays failed: {err}")));
     }
 
     Ok(fetched)

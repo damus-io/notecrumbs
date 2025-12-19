@@ -19,9 +19,9 @@ nostrdb = { git = "https://github.com/damus-io/nostrdb-rs", rev = "77fbc99a55f6a
 #nostr-sdk = { git = "https://github.com/damus-io/nostr-sdk.git", rev = "fc0dc7b38f5060f171228b976b9700c0135245d3" }
 #nostr-sdk = "0.37.0"
 #nostr = "0.37.0"
-# PR #1172: relay provenance tracking - https://github.com/rust-nostr/nostr/pull/1172
-nostr-sdk = { git = "https://github.com/alltheseas/rust-nostr.git", branch = "relay-provenance-tracking" }
-nostr = { git = "https://github.com/alltheseas/rust-nostr.git", branch = "relay-provenance-tracking" }
+# PR #1156: relay provenance via stream_events - https://github.com/rust-nostr/nostr/pull/1156
+nostr-sdk = { git = "https://github.com/rust-nostr/nostr.git", rev = "1ecd7161899cdd153e447851fe75002965aee133" }
+nostr = { git = "https://github.com/rust-nostr/nostr.git", rev = "1ecd7161899cdd153e447851fe75002965aee133" }
 hex = "0.4.3"
 egui = "0.23.0"
 egui_extras = { version = "0.23.0", features = ["image", "svg"] }

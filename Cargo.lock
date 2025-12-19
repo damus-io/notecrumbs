@@ -1703,7 +1703,7 @@ dependencies = [
 [[package]]
 name = "nostr"
 version = "0.44.1"
-source = "git+https://github.com/alltheseas/rust-nostr.git?branch=relay-provenance-tracking#2ea3dbea4d89697e1c2f2bd4dea1bb68432df6f5"
+source = "git+https://github.com/rust-nostr/nostr.git?rev=1ecd7161899cdd153e447851fe75002965aee133#1ecd7161899cdd153e447851fe75002965aee133"
 dependencies = [
  "base64 0.22.1",
  "bech32",
@@ -1727,7 +1727,7 @@ dependencies = [
 [[package]]
 name = "nostr-database"
 version = "0.44.0"
-source = "git+https://github.com/alltheseas/rust-nostr.git?branch=relay-provenance-tracking#2ea3dbea4d89697e1c2f2bd4dea1bb68432df6f5"
+source = "git+https://github.com/rust-nostr/nostr.git?rev=1ecd7161899cdd153e447851fe75002965aee133#1ecd7161899cdd153e447851fe75002965aee133"
 dependencies = [
  "btreecap",
  "lru",
@@ -1738,7 +1738,7 @@ dependencies = [
 [[package]]
 name = "nostr-gossip"
 version = "0.44.0"
-source = "git+https://github.com/alltheseas/rust-nostr.git?branch=relay-provenance-tracking#2ea3dbea4d89697e1c2f2bd4dea1bb68432df6f5"
+source = "git+https://github.com/rust-nostr/nostr.git?rev=1ecd7161899cdd153e447851fe75002965aee133#1ecd7161899cdd153e447851fe75002965aee133"
 dependencies = [
  "nostr",
 ]
@@ -1746,7 +1746,7 @@ dependencies = [
 [[package]]
 name = "nostr-relay-pool"
 version = "0.44.0"
-source = "git+https://github.com/alltheseas/rust-nostr.git?branch=relay-provenance-tracking#2ea3dbea4d89697e1c2f2bd4dea1bb68432df6f5"
+source = "git+https://github.com/rust-nostr/nostr.git?rev=1ecd7161899cdd153e447851fe75002965aee133#1ecd7161899cdd153e447851fe75002965aee133"
 dependencies = [
  "async-utility",
  "async-wsocket",
@@ -1763,7 +1763,7 @@ dependencies = [
 [[package]]
 name = "nostr-sdk"
 version = "0.44.1"
-source = "git+https://github.com/alltheseas/rust-nostr.git?branch=relay-provenance-tracking#2ea3dbea4d89697e1c2f2bd4dea1bb68432df6f5"
+source = "git+https://github.com/rust-nostr/nostr.git?rev=1ecd7161899cdd153e447851fe75002965aee133#1ecd7161899cdd153e447851fe75002965aee133"
 dependencies = [
  "async-utility",
  "nostr",

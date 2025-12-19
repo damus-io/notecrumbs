@@ -1,6 +1,7 @@
 use crate::Error;
 use nostr::prelude::RelayUrl;
-use nostr_sdk::prelude::{BoxedStream, Client, Filter, Keys, RelayEvent};
+use nostr_sdk::client::Error as ClientError;
+use nostr_sdk::prelude::{BoxedStream, Client, Event, Filter, Keys};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -141,23 +142,20 @@ impl RelayPool {
         Ok(())
     }
 
-    /// Stream events from relays, returning RelayEvent which includes source relay URL.
+    /// Stream events from relays, returning tuples of (RelayUrl, Result<Event, Error>).
     /// Takes a single Filter - callers should combine filters before calling.
     pub async fn stream_events(
         &self,
         filter: Filter,
         relays: &[RelayUrl],
         timeout: Duration,
-    ) -> Result<BoxedStream<RelayEvent>, Error> {
+    ) -> Result<BoxedStream<(RelayUrl, Result<Event, ClientError>)>, Error> {
         if relays.is_empty() {
-            Ok(self
-                .client
-                .stream_events_with_source(filter, timeout)
-                .await?)
+            Ok(self.client.stream_events(filter, timeout).await?)
         } else {
             Ok(self
                 .client
-                .stream_events_from_with_source(relays.to_vec(), filter, timeout)
+                .stream_events_from(relays.to_vec(), filter, timeout)
                 .await?)
         }
     }

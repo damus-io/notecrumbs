@@ -713,15 +713,15 @@ fn extract_quote_refs_from_content(note: &Note, blocks: &Blocks) -> Vec<QuoteRef
                     original_bech32: Some(block.as_str().to_string()),
                 });
             }
-            // naddr mentions - article addresses
+            // naddr mentions - article/highlight addresses
             // Parse the bech32 string with nostr_sdk to extract kind/pubkey/identifier
             Mention::Addr(_addr) => {
                 use nostr_sdk::prelude::Nip19;
                 let bech32_str = block.as_str();
                 if let Ok(Nip19::Coordinate(coord)) = Nip19::from_bech32(bech32_str) {
                     let kind = coord.kind.as_u16();
-                    // Only include article kinds as quotes
-                    if kind == 30023 || kind == 30024 {
+                    // Include articles (30023/30024) and highlights (9802) as quotes
+                    if kind == 30023 || kind == 30024 || kind == 9802 {
                         let addr_str = format!(
                             "{}:{}:{}",
                             kind,
@@ -914,8 +914,8 @@ fn build_embedded_quotes_html(
             ))
             .unwrap_or_default();
 
-        // Build content preview and type indicator based on note kind
-        let (content_preview, is_truncated, type_indicator) = match quoted_note.kind() {
+        // Build content preview, type indicator, and content class based on note kind
+        let (content_preview, is_truncated, type_indicator, content_class) = match quoted_note.kind() {
             // For articles, show title instead of body content
             30023 | 30024 => {
                 let mut title: Option<&str> = None;
@@ -934,21 +934,21 @@ fn build_embedded_quotes_html(
                 } else {
                     r#"<span class="damus-embedded-quote-type">Article</span>"#
                 };
-                (title.unwrap_or("Untitled article").to_string(), false, indicator)
+                (title.unwrap_or("Untitled article").to_string(), false, indicator, "")
             }
-            // For highlights, show the highlighted text
+            // For highlights, show the highlighted text with left border styling (no tag needed)
             9802 => {
                 let full_content = quoted_note.content();
                 let content = abbreviate(full_content, 200);
                 let truncated = content.len() < full_content.len();
-                (format!("\"{}\"", content), truncated, r#"<span class="damus-embedded-quote-type">Highlight</span>"#)
+                (content.to_string(), truncated, "", " damus-embedded-quote-highlight")
             }
             // For regular notes, show abbreviated content
             _ => {
                 let full_content = quoted_note.content();
                 let content = abbreviate(full_content, 280);
                 let truncated = content.len() < full_content.len();
-                (content.to_string(), truncated, "")
+                (content.to_string(), truncated, "", "")
             }
         };
         let content_html = html_escape::encode_text(&content_preview).replace("\n", " ");
@@ -976,7 +976,7 @@ fn build_embedded_quotes_html(
                     {type_indicator}
                 </div>
                 {reply}
-                <div class="damus-embedded-quote-content">{content} {showmore}</div>
+                <div class="damus-embedded-quote-content{content_class}">{content} {showmore}</div>
                 {urls}
             </a>"#,
             link = link,
@@ -986,6 +986,7 @@ fn build_embedded_quotes_html(
             time = time_html,
             type_indicator = type_indicator,
             reply = reply_html,
+            content_class = content_class,
             content = content_html,
             showmore = show_more_html,
             urls = url_pills_html

@@ -584,6 +584,12 @@ a:hover {
   line-height: 1.5;
 }
 
+.damus-embedded-quote-highlight {
+  border-left: 3px solid var(--damus-accent);
+  padding-left: 0.75rem;
+  font-style: italic;
+}
+
 .damus-embedded-quote-showmore {
   color: var(--damus-accent);
   font-weight: 500;

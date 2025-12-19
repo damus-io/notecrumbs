@@ -8,7 +8,7 @@ use ammonia::Builder as HtmlSanitizer;
 use http_body_util::Full;
 use hyper::{body::Bytes, header, Request, Response, StatusCode};
 use nostr::nips::nip19::Nip19Event;
-use nostr_sdk::prelude::{EventId, Nip19, PublicKey, RelayUrl, ToBech32};
+use nostr_sdk::prelude::{EventId, FromBech32, Nip19, PublicKey, RelayUrl, ToBech32};
 use nostrdb::{
     BlockType, Blocks, Filter, Mention, Ndb, NdbProfile, Note, NoteKey, ProfileRecord, Transaction,
 };
@@ -75,6 +75,29 @@ struct ArticleMetadata {
     summary: Option<String>,
     published_at: Option<u64>,
     topics: Vec<String>,
+}
+
+/// Metadata extracted from NIP-84 highlight events (kind:9802).
+///
+/// Highlights capture a passage from source content with optional context.
+/// Sources can be: web URLs (r tag), nostr notes (e tag), or articles (a tag).
+#[derive(Default)]
+struct HighlightMetadata {
+    /// Surrounding text providing context for the highlight (from "context" tag)
+    context: Option<String>,
+    /// User's comment/annotation on the highlight (from "comment" tag)
+    comment: Option<String>,
+    /// Web URL source - external article or page (from "r" tag)
+    source_url: Option<String>,
+    /// Nostr note ID - reference to a kind:1 shortform note (from "e" tag)
+    source_event_id: Option<[u8; 32]>,
+    /// Original nevent bech32 with relay hints (from "e" tag if bech32 format)
+    source_event_bech32: Option<String>,
+    /// Nostr article address - reference to kind:30023/30024 (from "a" tag)
+    /// Format: "30023:{pubkey_hex}:{d-identifier}"
+    source_article_addr: Option<String>,
+    /// Original naddr bech32 with relay hints (from "a" tag if bech32 format)
+    source_article_bech32: Option<String>,
 }
 
 fn collapse_whitespace<S: AsRef<str>>(input: S) -> String {
@@ -144,6 +167,124 @@ fn extract_article_metadata(note: &Note) -> ArticleMetadata {
                     }
                 }
             }
+            _ => {}
+        }
+    }
+
+    meta
+}
+
+/// Extracts NIP-84 highlight metadata from a kind:9802 note.
+///
+/// Parses tags to identify the highlight source:
+/// - "context" tag: surrounding text for context
+/// - "r" tag: web URL source (external article/page)
+/// - "e" tag: nostr note ID (kind:1 shortform note)
+/// - "a" tag: nostr article address (kind:30023/30024 longform)
+fn extract_highlight_metadata(note: &Note) -> HighlightMetadata {
+    let mut meta = HighlightMetadata::default();
+
+    for tag in note.tags() {
+        let mut iter = tag.into_iter();
+
+        // Skip tags without a valid tag kind
+        let Some(tag_kind) = iter.next().and_then(|nstr| nstr.variant().str()) else {
+            continue;
+        };
+
+        match tag_kind {
+            // Context tag: surrounding text that provides context for the highlight
+            "context" => {
+                let Some(value) = iter.next().and_then(|nstr| nstr.variant().str()) else {
+                    continue;
+                };
+                if !value.trim().is_empty() {
+                    meta.context = Some(value.to_owned());
+                }
+            }
+
+            // Comment tag: user's annotation/comment on the highlight
+            "comment" => {
+                let Some(value) = iter.next().and_then(|nstr| nstr.variant().str()) else {
+                    continue;
+                };
+                if !value.trim().is_empty() {
+                    meta.comment = Some(value.to_owned());
+                }
+            }
+
+            // R tag: web URL source (external content)
+            "r" => {
+                let Some(value) = iter.next().and_then(|nstr| nstr.variant().str()) else {
+                    continue;
+                };
+                let trimmed = value.trim();
+                if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                    meta.source_url = Some(trimmed.to_owned());
+                }
+            }
+
+            // E tag: reference to a nostr note (kind:1 shortform)
+            // Can be hex event ID or nevent bech32 with relay hints
+            "e" => {
+                use nostr_sdk::prelude::Nip19;
+                let Some(value) = iter.next().and_then(|nstr| nstr.variant().str()) else {
+                    continue;
+                };
+                let trimmed = value.trim();
+
+                // Try nevent bech32 first (preserves relay hints)
+                if trimmed.starts_with("nevent1") {
+                    if let Ok(Nip19::Event(ev)) = Nip19::from_bech32(trimmed) {
+                        meta.source_event_id = Some(*ev.event_id.as_bytes());
+                        meta.source_event_bech32 = Some(trimmed.to_owned());
+                        continue;
+                    }
+                }
+
+                // Fallback: parse hex event ID (32 bytes = 64 hex chars)
+                let Ok(bytes) = hex::decode(trimmed) else {
+                    continue;
+                };
+                let Ok(event_id): Result<[u8; 32], _> = bytes.try_into() else {
+                    continue;
+                };
+                meta.source_event_id = Some(event_id);
+            }
+
+            // A tag: reference to a replaceable event (kind:30023/30024 article)
+            // Can be "30023:{pubkey}:{d-identifier}" or naddr bech32 with relay hints
+            "a" => {
+                use nostr_sdk::prelude::Nip19;
+                let Some(value) = iter.next().and_then(|nstr| nstr.variant().str()) else {
+                    continue;
+                };
+                let trimmed = value.trim();
+
+                // Try naddr bech32 first (preserves relay hints)
+                if trimmed.starts_with("naddr1") {
+                    if let Ok(Nip19::Coordinate(coord)) = Nip19::from_bech32(trimmed) {
+                        let kind = coord.kind.as_u16();
+                        if kind == 30023 || kind == 30024 {
+                            let addr = format!(
+                                "{}:{}:{}",
+                                kind,
+                                coord.public_key.to_hex(),
+                                coord.identifier
+                            );
+                            meta.source_article_addr = Some(addr);
+                            meta.source_article_bech32 = Some(trimmed.to_owned());
+                        }
+                        continue;
+                    }
+                }
+
+                // Fallback: kind:pubkey:d-identifier format
+                if trimmed.starts_with("30023:") || trimmed.starts_with("30024:") {
+                    meta.source_article_addr = Some(trimmed.to_owned());
+                }
+            }
+
             _ => {}
         }
     }
@@ -256,7 +397,13 @@ fn is_image(url: &str) -> bool {
         .any(|ext| ends_with(strip_querystring(url), ext))
 }
 
-pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
+pub fn render_note_content(
+    body: &mut Vec<u8>,
+    note: &Note,
+    blocks: &Blocks,
+    ndb: &Ndb,
+    txn: &Transaction,
+) {
     for block in blocks.iter(note) {
         match block.blocktype() {
             BlockType::Url => {
@@ -294,17 +441,52 @@ pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
 
             BlockType::MentionBech32 => {
                 match block.as_mention().unwrap() {
-                    Mention::Event(_)
-                    | Mention::Note(_)
-                    | Mention::Profile(_)
-                    | Mention::Pubkey(_)
-                    | Mention::Secret(_)
-                    | Mention::Addr(_) => {
+                    // Profile mentions: show the human-readable name (issue #41)
+                    Mention::Profile(profile) => {
+                        let display = lookup_profile_name(ndb, txn, profile.pubkey())
+                            .unwrap_or_else(|| abbrev_str(block.as_str()).to_string());
+                        let display_html = html_escape::encode_text(&display);
                         let _ = write!(
                             body,
-                            r#"<a href="/{}">@{}</a>"#,
-                            block.as_str(),
-                            &abbrev_str(block.as_str())
+                            r#"<a href="/{bech32}">@{display}</a>"#,
+                            bech32 = block.as_str(),
+                            display = display_html
+                        );
+                    }
+                    Mention::Pubkey(npub) => {
+                        let display = lookup_profile_name(ndb, txn, npub.pubkey())
+                            .unwrap_or_else(|| abbrev_str(block.as_str()).to_string());
+                        let display_html = html_escape::encode_text(&display);
+                        let _ = write!(
+                            body,
+                            r#"<a href="/{bech32}">@{display}</a>"#,
+                            bech32 = block.as_str(),
+                            display = display_html
+                        );
+                    }
+
+                    // Event/note mentions: skip inline rendering since they're shown as embedded quotes
+                    Mention::Event(_) | Mention::Note(_) => {
+                        // These will be rendered as embedded quote cards below the note body
+                    }
+
+                    // Article address mentions: link with abbreviated address
+                    // Note: naddr lookup requires parsing bech32 to get kind, simplified for now
+                    Mention::Addr(_addr) => {
+                        let _ = write!(
+                            body,
+                            r#"<a href="/{bech32}">{display}</a>"#,
+                            bech32 = block.as_str(),
+                            display = abbrev_str(block.as_str())
+                        );
+                    }
+
+                    Mention::Secret(_) => {
+                        let _ = write!(
+                            body,
+                            r#"<a href="/{bech32}">@{abbrev}</a>"#,
+                            bech32 = block.as_str(),
+                            abbrev = abbrev_str(block.as_str())
                         );
                     }
 
@@ -320,6 +502,551 @@ pub fn render_note_content(body: &mut Vec<u8>, note: &Note, blocks: &Blocks) {
             }
         };
     }
+}
+
+/// Looks up a profile name from nostrdb by pubkey.
+/// Returns the display_name or name, or None if not found.
+fn lookup_profile_name(ndb: &Ndb, txn: &Transaction, pubkey: &[u8; 32]) -> Option<String> {
+    let profile_rec = ndb.get_profile_by_pubkey(txn, pubkey).ok()?;
+    let profile = profile_rec.record().profile()?;
+    profile.display_name().or_else(|| profile.name()).map(|s| s.to_owned())
+}
+
+/// Looks up a profile and returns "@username" format for reply context (matches iOS Damus style).
+fn lookup_profile_handle(ndb: &Ndb, txn: &Transaction, pubkey: &[u8; 32]) -> Option<String> {
+    let profile_rec = ndb.get_profile_by_pubkey(txn, pubkey).ok()?;
+    let profile = profile_rec.record().profile()?;
+    // Prefer the username/handle (name field), fall back to display_name
+    profile.name().or_else(|| profile.display_name()).map(|s| format!("@{}", s))
+}
+
+/// Parses a hex string into a 32-byte array. Returns None on invalid input.
+fn parse_hex_id(hex: &str) -> Option<[u8; 32]> {
+    let bytes = hex::decode(hex).ok()?;
+    bytes.try_into().ok()
+}
+
+/// Detects the reply-to author for a note per NIP-10.
+///
+/// Strategy:
+/// 1. Find e-tag with "reply" marker → look up that event → get author pubkey
+/// 2. Fallback: use first p-tag not marked as "mention"
+///
+/// Returns the author's handle in "@username" format, or None if not a reply.
+fn detect_reply_author(ndb: &Ndb, txn: &Transaction, note: &Note) -> Option<String> {
+    let mut reply_event_id: Option<[u8; 32]> = None;
+    let mut fallback_pubkey: Option<[u8; 32]> = None;
+
+    for tag in note.tags() {
+        let tag_vec: Vec<_> = tag.into_iter().collect();
+
+        let Some(tag_name) = tag_vec.first().and_then(|n| n.variant().str()) else {
+            continue;
+        };
+        let tag_value = tag_vec.get(1).and_then(|n| n.variant().str());
+        let tag_marker = tag_vec.get(3).and_then(|n| n.variant().str());
+
+        match tag_name {
+            "e" if tag_marker == Some("reply") => {
+                // NIP-10: e-tag with "reply" marker points to parent event
+                if let Some(eid) = tag_value.and_then(parse_hex_id) {
+                    reply_event_id = Some(eid);
+                }
+            }
+            "p" if fallback_pubkey.is_none() && tag_marker != Some("mention") => {
+                // First p-tag not marked "mention" is likely the reply-to author
+                if let Some(pk) = tag_value.and_then(parse_hex_id) {
+                    fallback_pubkey = Some(pk);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Primary: look up the replied-to event and get its author
+    if let Some(eid) = reply_event_id {
+        if let Ok(parent) = ndb.get_note_by_id(txn, &eid) {
+            let author_pk: [u8; 32] = parent.pubkey().to_owned();
+            if let Some(handle) = lookup_profile_handle(ndb, txn, &author_pk) {
+                return Some(handle);
+            }
+        }
+    }
+
+    // Fallback: use p-tag pubkey directly
+    fallback_pubkey.and_then(|pk| lookup_profile_handle(ndb, txn, &pk))
+}
+
+/// Formats a unix timestamp as a relative time string (e.g., "6h", "2d", "3w").
+fn format_relative_time(timestamp: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    if timestamp > now {
+        return "now".to_string();
+    }
+
+    let diff = now - timestamp;
+    let minutes = diff / 60;
+    let hours = diff / 3600;
+    let days = diff / 86400;
+    let weeks = diff / 604800;
+
+    if minutes < 1 {
+        "now".to_string()
+    } else if minutes < 60 {
+        format!("{}m", minutes)
+    } else if hours < 24 {
+        format!("{}h", hours)
+    } else if days < 7 {
+        format!("{}d", days)
+    } else {
+        format!("{}w", weeks)
+    }
+}
+
+/// Extracts URLs from content and returns HTML for domain preview pills.
+/// Currently disabled - may be re-enabled in the future.
+#[allow(dead_code)]
+fn extract_url_pills(content: &str) -> String {
+    let mut pills = Vec::new();
+    let mut seen_domains = std::collections::HashSet::new();
+
+    // Find URLs anywhere in content by scanning for http:// or https://
+    let mut remaining = content;
+    while let Some(start) = remaining.find("http://").or_else(|| remaining.find("https://")) {
+        let url_start = &remaining[start..];
+        // Find end of URL - stop at whitespace or common delimiters
+        let end = url_start
+            .char_indices()
+            .skip(8)  // Skip past "https://" or "http://"
+            .find(|(_, c)| matches!(*c, ' ' | '\t' | '\n' | '\r' | '"' | '\'' | '<' | '>' | ']' | ')' | '`'))
+            .map(|(i, _)| i)
+            .unwrap_or(url_start.len());
+
+        let url = &url_start[..end];
+        remaining = &remaining[start + end..];
+
+        // Extract domain from URL
+        let domain = url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches("www.");
+
+        // Skip invalid domains (must have a dot, at least 4 chars like "a.co", not just punctuation)
+        if domain.len() < 4 || !domain.contains('.') || seen_domains.contains(domain) {
+            continue;
+        }
+        seen_domains.insert(domain.to_string());
+
+        let domain_html = html_escape::encode_text(domain);
+        pills.push(format!(
+            r#"<span class="damus-embedded-quote-url">{}</span>"#,
+            domain_html
+        ));
+
+        // Limit to 4 URL pills to avoid clutter
+        if pills.len() >= 4 {
+            break;
+        }
+    }
+
+    if pills.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<div class="damus-embedded-quote-urls">{}</div>"#, pills.join(""))
+    }
+}
+
+/// Represents a quoted event reference from a q tag (NIP-18).
+struct QuoteRef {
+    /// Event ID for looking up the event in nostrdb
+    event_id: Option<[u8; 32]>,
+    /// Article address for replaceable events (kind:pubkey:d-tag)
+    article_addr: Option<String>,
+    /// Original bech32 string with relay hints (for links)
+    original_bech32: Option<String>,
+}
+
+/// Extracts quote references from inline nevent/note mentions in content.
+/// These are nostr:nevent1... or nostr:note1... mentions parsed by nostrdb.
+fn extract_quote_refs_from_content(note: &Note, blocks: &Blocks) -> Vec<QuoteRef> {
+    let mut quotes = Vec::new();
+
+    for block in blocks.iter(note) {
+        if block.blocktype() != BlockType::MentionBech32 {
+            continue;
+        }
+
+        let Some(mention) = block.as_mention() else {
+            continue;
+        };
+
+        match mention {
+            // nevent mentions - includes relay hints
+            Mention::Event(ev) => {
+                quotes.push(QuoteRef {
+                    event_id: Some(*ev.id()),
+                    article_addr: None,
+                    original_bech32: Some(block.as_str().to_string()),
+                });
+            }
+            // note1 mentions - just the event ID
+            Mention::Note(note_ref) => {
+                quotes.push(QuoteRef {
+                    event_id: Some(*note_ref.id()),
+                    article_addr: None,
+                    original_bech32: Some(block.as_str().to_string()),
+                });
+            }
+            // naddr mentions - article addresses
+            // Parse the bech32 string with nostr_sdk to extract kind/pubkey/identifier
+            Mention::Addr(_addr) => {
+                use nostr_sdk::prelude::Nip19;
+                let bech32_str = block.as_str();
+                if let Ok(Nip19::Coordinate(coord)) = Nip19::from_bech32(bech32_str) {
+                    let kind = coord.kind.as_u16();
+                    // Only include article kinds as quotes
+                    if kind == 30023 || kind == 30024 {
+                        let addr_str = format!(
+                            "{}:{}:{}",
+                            kind,
+                            coord.public_key.to_hex(),
+                            coord.identifier
+                        );
+                        quotes.push(QuoteRef {
+                            event_id: None,
+                            article_addr: Some(addr_str),
+                            original_bech32: Some(bech32_str.to_string()),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    quotes
+}
+
+/// Extracts quote references from q tags (NIP-18 quote reposts).
+/// Handles hex event IDs, nevent/naddr bech32, and kind:pubkey:d addresses.
+fn extract_quote_refs_from_tags(note: &Note) -> Vec<QuoteRef> {
+    use nostr_sdk::prelude::Nip19;
+
+    let mut quotes = Vec::new();
+
+    for tag in note.tags() {
+        let mut iter = tag.into_iter();
+        let Some(tag_name) = iter.next().and_then(|n| n.variant().str()) else {
+            continue;
+        };
+        if tag_name != "q" {
+            continue;
+        }
+
+        let Some(value) = iter.next().and_then(|n| n.variant().str()) else {
+            continue;
+        };
+        let trimmed = value.trim();
+
+        // Try parsing as nevent/naddr bech32 (preserves relay hints)
+        if trimmed.starts_with("nevent1") || trimmed.starts_with("note1") {
+            if let Ok(nip19) = Nip19::from_bech32(trimmed) {
+                let event_id = match &nip19 {
+                    Nip19::Event(ev) => Some(*ev.event_id.as_bytes()),
+                    Nip19::EventId(id) => Some(*id.as_bytes()),
+                    _ => None,
+                };
+                if event_id.is_some() {
+                    quotes.push(QuoteRef {
+                        event_id,
+                        article_addr: None,
+                        original_bech32: Some(trimmed.to_owned()),
+                    });
+                    continue;
+                }
+            }
+        }
+
+        // Try parsing as naddr bech32 (for articles with relay hints)
+        if trimmed.starts_with("naddr1") {
+            if let Ok(Nip19::Coordinate(coord)) = Nip19::from_bech32(trimmed) {
+                let addr = format!(
+                    "{}:{}:{}",
+                    coord.kind.as_u16(),
+                    coord.public_key.to_hex(),
+                    coord.identifier
+                );
+                quotes.push(QuoteRef {
+                    event_id: None,
+                    article_addr: Some(addr),
+                    original_bech32: Some(trimmed.to_owned()),
+                });
+                continue;
+            }
+        }
+
+        // Check if it's an article address (kind:pubkey:d-tag)
+        if trimmed.starts_with("30023:") || trimmed.starts_with("30024:") {
+            quotes.push(QuoteRef {
+                event_id: None,
+                article_addr: Some(trimmed.to_owned()),
+                original_bech32: None,
+            });
+            continue;
+        }
+
+        // Otherwise try to parse as hex event ID
+        let Ok(bytes) = hex::decode(trimmed) else {
+            continue;
+        };
+        let Ok(event_id): Result<[u8; 32], _> = bytes.try_into() else {
+            continue;
+        };
+        quotes.push(QuoteRef {
+            event_id: Some(event_id),
+            article_addr: None,
+            original_bech32: None,
+        });
+    }
+
+    quotes
+}
+
+/// Builds embedded quote HTML for referenced events.
+/// Returns empty string if no quotes or quoted events not found.
+fn build_embedded_quotes_html(
+    ndb: &Ndb,
+    txn: &Transaction,
+    quote_refs: &[QuoteRef],
+) -> String {
+    if quote_refs.is_empty() {
+        return String::new();
+    }
+
+    let mut quotes_html = String::new();
+
+    for quote_ref in quote_refs {
+        // Try to find the quoted note in nostrdb
+        let quoted_note = if let Some(event_id) = &quote_ref.event_id {
+            // Look up by event ID
+            ndb.get_note_by_id(txn, event_id).ok()
+        } else if let Some(addr) = &quote_ref.article_addr {
+            // Look up article by address
+            lookup_article_by_addr(ndb, txn, addr)
+        } else {
+            None
+        };
+
+        let Some(quoted_note) = quoted_note else {
+            continue;
+        };
+
+        // Get author profile for the quoted note (name, username, pfp)
+        let (display_name, username, pfp_url) = ndb
+            .get_profile_by_pubkey(txn, quoted_note.pubkey())
+            .ok()
+            .and_then(|profile_rec| {
+                profile_rec.record().profile().map(|p| {
+                    let name = p.display_name().or_else(|| p.name()).map(|n| n.to_owned());
+                    let handle = p.name().map(|n| format!("@{}", n));
+                    let picture = p.picture().map(|s| s.to_owned());
+                    (name, handle, picture)
+                })
+            })
+            .unwrap_or((None, None, None));
+
+        let display_name = display_name.unwrap_or_else(|| "nostrich".to_string());
+        let display_name_html = html_escape::encode_text(&display_name);
+        let username_html = username
+            .map(|u| format!(r#" <span class="damus-embedded-quote-username">{}</span>"#,
+                html_escape::encode_text(&u)))
+            .unwrap_or_default();
+
+        // Build profile picture HTML - use placeholder if not available
+        let pfp_html = pfp_url
+            .filter(|url| !url.trim().is_empty())
+            .map(|url| {
+                let pfp_attr = html_escape::encode_double_quoted_attribute(&url);
+                format!(r#"<img src="{}" class="damus-embedded-quote-avatar" alt="" />"#, pfp_attr)
+            })
+            .unwrap_or_else(|| {
+                r#"<img src="/img/no-profile.svg" class="damus-embedded-quote-avatar" alt="" />"#.to_string()
+            });
+
+        // Get relative timestamp
+        let timestamp = quoted_note.created_at();
+        let relative_time = format_relative_time(timestamp);
+        let time_html = html_escape::encode_text(&relative_time);
+
+        // Detect reply context per NIP-10:
+        // 1. Find e-tag with "reply" marker → look up that event → get author
+        // 2. Fallback: use first p-tag not marked "mention"
+        let reply_to = detect_reply_author(ndb, txn, &quoted_note);
+
+        let reply_html = reply_to
+            .map(|name| format!(
+                r#"<div class="damus-embedded-quote-reply">Replying to {}</div>"#,
+                html_escape::encode_text(&name)
+            ))
+            .unwrap_or_default();
+
+        // Build content preview based on note kind
+        let (content_preview, is_truncated) = match quoted_note.kind() {
+            // For articles, show title instead of body content
+            30023 | 30024 => {
+                let mut title: Option<&str> = None;
+                for tag in quoted_note.tags() {
+                    let mut iter = tag.into_iter();
+                    let Some(tag_name) = iter.next().and_then(|n| n.variant().str()) else {
+                        continue;
+                    };
+                    if tag_name == "title" {
+                        title = iter.next().and_then(|n| n.variant().str());
+                        break;
+                    }
+                }
+                (title.unwrap_or("Untitled article").to_string(), false)
+            }
+            // For highlights, show the highlighted text
+            9802 => {
+                let full_content = quoted_note.content();
+                let content = abbreviate(full_content, 200);
+                let truncated = content.len() < full_content.len();
+                (format!("\"{}\"", content), truncated)
+            }
+            // For regular notes, show abbreviated content
+            _ => {
+                let full_content = quoted_note.content();
+                let content = abbreviate(full_content, 280);
+                let truncated = content.len() < full_content.len();
+                (content.to_string(), truncated)
+            }
+        };
+        let content_html = html_escape::encode_text(&content_preview).replace("\n", " ");
+
+        // Build "Show more" link if content was truncated
+        let show_more_html = if is_truncated {
+            r#"<span class="damus-embedded-quote-showmore">Show more</span>"#
+        } else {
+            ""
+        };
+
+        // URL pills disabled for now
+        let url_pills_html = String::new();
+
+        // Build link to quoted note
+        let link = build_quote_link(quote_ref);
+
+        let _ = write!(
+            quotes_html,
+            r#"<a href="{link}" class="damus-embedded-quote">
+                <div class="damus-embedded-quote-header">
+                    {pfp}
+                    <span class="damus-embedded-quote-author">{name}</span>{username}
+                    <span class="damus-embedded-quote-time">· {time}</span>
+                </div>
+                {reply}
+                <div class="damus-embedded-quote-content">{content} {showmore}</div>
+                {urls}
+            </a>"#,
+            link = link,
+            pfp = pfp_html,
+            name = display_name_html,
+            username = username_html,
+            time = time_html,
+            reply = reply_html,
+            content = content_html,
+            showmore = show_more_html,
+            urls = url_pills_html
+        );
+    }
+
+    if quotes_html.is_empty() {
+        return String::new();
+    }
+
+    format!(r#"<div class="damus-embedded-quotes">{}</div>"#, quotes_html)
+}
+
+/// Looks up an article note by its address (kind:pubkey:d-tag).
+fn lookup_article_by_addr<'a>(ndb: &'a Ndb, txn: &'a Transaction, addr: &str) -> Option<Note<'a>> {
+    let parts: Vec<&str> = addr.splitn(3, ':').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let kind: u64 = parts[0].parse().ok()?;
+    let pubkey_bytes = hex::decode(parts[1]).ok()?;
+    let pubkey: [u8; 32] = pubkey_bytes.try_into().ok()?;
+    let d_identifier = parts[2];
+
+    let filter = Filter::new()
+        .authors([&pubkey])
+        .kinds([kind])
+        .build();
+
+    let results = ndb.query(txn, &[filter], 10).ok()?;
+
+    for result in results {
+        for tag in result.note.tags() {
+            let mut iter = tag.into_iter();
+            let tag_name = iter.next()?.variant().str()?;
+            if tag_name != "d" {
+                continue;
+            }
+            let d_value = iter.next()?.variant().str()?;
+            if d_value == d_identifier {
+                // Re-fetch the note to get an owned reference
+                return ndb.get_note_by_key(txn, result.note_key).ok();
+            }
+        }
+    }
+
+    None
+}
+
+/// Builds a link URL for a quote reference.
+/// Prefers original_bech32 to preserve relay hints from the q tag.
+fn build_quote_link(quote_ref: &QuoteRef) -> String {
+    // Prefer original bech32 to preserve relay hints
+    if let Some(bech32) = &quote_ref.original_bech32 {
+        return format!("/{}", bech32);
+    }
+
+    // Fallback: generate bech32 without relay hints
+    use nostr_sdk::prelude::EventId;
+
+    if let Some(event_id) = &quote_ref.event_id {
+        if let Ok(id) = EventId::from_slice(event_id) {
+            if let Ok(bech32) = id.to_bech32() {
+                return format!("/{}", bech32);
+            }
+        }
+    }
+
+    if let Some(addr) = &quote_ref.article_addr {
+        let parts: Vec<&str> = addr.splitn(3, ':').collect();
+        if parts.len() >= 3 {
+            if let Ok(kind) = parts[0].parse::<u16>() {
+                if let Ok(pubkey) = PublicKey::from_hex(parts[1]) {
+                    use nostr_sdk::prelude::{Coordinate, Kind};
+                    let coordinate = Coordinate::new(Kind::from(kind), pubkey).identifier(parts[2]);
+                    if let Ok(naddr) = coordinate.to_bech32() {
+                        return format!("/{}", naddr);
+                    }
+                }
+            }
+        }
+    }
+
+    "#".to_string()
 }
 
 struct Profile<'a> {
@@ -350,11 +1077,12 @@ fn build_note_content_html(
     relays: &[RelayUrl],
 ) -> String {
     let mut body_buf = Vec::new();
-    if let Some(blocks) = note
+    let blocks = note
         .key()
-        .and_then(|nk| app.ndb.get_blocks_by_key(txn, nk).ok())
-    {
-        render_note_content(&mut body_buf, note, &blocks);
+        .and_then(|nk| app.ndb.get_blocks_by_key(txn, nk).ok());
+
+    if let Some(ref blocks) = blocks {
+        render_note_content(&mut body_buf, note, blocks, &app.ndb, txn);
     } else {
         let _ = write!(body_buf, "{}", html_escape::encode_text(note.content()));
     }
@@ -373,6 +1101,29 @@ fn build_note_content_html(
     );
     let note_id = nevent.to_bech32().unwrap();
 
+    // Extract quote refs from q tags (NIP-18) and inline mentions
+    let mut quote_refs = extract_quote_refs_from_tags(note);
+    if let Some(ref blocks) = blocks {
+        // Also extract from inline nevent/note/naddr mentions in content
+        let content_refs = extract_quote_refs_from_content(note, blocks);
+        for content_ref in content_refs {
+            // Avoid duplicates: only add if not already present
+            let is_duplicate = quote_refs.iter().any(|existing| {
+                match (&existing.event_id, &content_ref.event_id) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => match (&existing.article_addr, &content_ref.article_addr) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => false,
+                    },
+                }
+            });
+            if !is_duplicate {
+                quote_refs.push(content_ref);
+            }
+        }
+    }
+    let quotes_html = build_embedded_quotes_html(&app.ndb, txn, &quote_refs);
+
     format!(
         r#"<article class="damus-card damus-note">
             <header class="damus-note-header">
@@ -389,12 +1140,14 @@ fn build_note_content_html(
                </div>
             </header>
             <div class="damus-note-body">{body}</div>
+            {quotes}
         </article>"#,
         base = base_url,
         pfp = pfp_attr,
         author = author_display,
         ts = timestamp_attr,
-        body = note_body
+        body = note_body,
+        quotes = quotes_html
     )
 }
 
@@ -407,6 +1160,7 @@ fn build_article_content_html(
     summary_html: Option<&str>,
     article_body_html: &str,
     topics: &[String],
+    is_draft: bool,
     base_url: &str,
 ) -> String {
     let pfp_attr = pfp_url_attr(
@@ -448,6 +1202,13 @@ fn build_article_content_html(
         topics_markup.push_str("</div>");
     }
 
+    // Draft badge for unpublished articles (kind:30024)
+    let draft_markup = if is_draft {
+        r#"<span class="damus-article-draft">DRAFT</span>"#
+    } else {
+        ""
+    };
+
     format!(
         r#"<article class="damus-card damus-note">
             <header class="damus-note-header">
@@ -457,7 +1218,7 @@ fn build_article_content_html(
                  <time class="damus-note-time" data-timestamp="{ts}" datetime="{ts}" title="{ts}">{ts}</time>
                </div>
             </header>
-            <h1 class="damus-article-title">{title}</h1>
+            <h1 class="damus-article-title">{title}{draft}</h1>
             {hero}
             {summary}
             {topics}
@@ -467,10 +1228,318 @@ fn build_article_content_html(
         author = author_display,
         ts = timestamp_attr,
         title = article_title_html,
+        draft = draft_markup,
         hero = hero_markup,
         summary = summary_markup,
         topics = topics_markup,
         body = article_body_html
+    )
+}
+
+/// Builds HTML for a NIP-84 highlight (kind:9802).
+///
+/// Highlights display quoted text from a source with optional context and comment.
+/// Source can be: web URL (r tag), nostr note (e tag), or article (a tag).
+fn build_highlight_content_html(
+    profile: &Profile<'_>,
+    base_url: &str,
+    timestamp_value: u64,
+    highlight_text_html: &str,
+    context_html: Option<&str>,
+    comment_html: Option<&str>,
+    source_markup: &str,
+) -> String {
+    let author_display = author_display_html(profile.record.as_ref());
+    let pfp_attr = pfp_url_attr(
+        profile.record.as_ref().and_then(|r| r.record().profile()),
+        base_url,
+    );
+    let timestamp_attr = timestamp_value.to_string();
+
+    // Build optional context section (surrounding text that gives context to the highlight)
+    let context_markup = context_html
+        .filter(|ctx| !ctx.is_empty())
+        .map(|ctx| format!(r#"<div class="damus-highlight-context">…{ctx}…</div>"#))
+        .unwrap_or_default();
+
+    // Build optional comment section (user's annotation on the highlight)
+    let comment_markup = comment_html
+        .filter(|c| !c.is_empty())
+        .map(|c| format!(r#"<div class="damus-highlight-comment">{c}</div>"#))
+        .unwrap_or_default();
+
+    format!(
+        r#"<article class="damus-card damus-highlight">
+            <header class="damus-note-header">
+               <img src="{pfp}" class="damus-note-avatar" alt="{author} profile picture" />
+               <div>
+                 <div class="damus-note-author">{author}</div>
+                 <time class="damus-note-time" data-timestamp="{ts}" datetime="{ts}" title="{ts}">{ts}</time>
+               </div>
+            </header>
+            {comment}
+            <blockquote class="damus-highlight-text">{highlight}</blockquote>
+            {context}
+            {source}
+        </article>"#,
+        pfp = pfp_attr,
+        author = author_display,
+        ts = timestamp_attr,
+        comment = comment_markup,
+        highlight = highlight_text_html,
+        context = context_markup,
+        source = source_markup
+    )
+}
+
+/// Builds the source attribution markup for a highlight.
+///
+/// Handles three source types per NIP-84:
+/// - Web URL (r tag): external link to web content
+/// - Nostr note (e tag): internal link to kind:1 note via nevent
+/// - Nostr article (a tag): internal link to kind:30023/30024 via naddr
+///
+/// For article sources, attempts to look up the article title from nostrdb.
+fn build_highlight_source_markup(
+    ndb: &Ndb,
+    txn: &Transaction,
+    meta: &HighlightMetadata,
+) -> String {
+    // Priority: article > note > URL (most specific to least specific)
+
+    // Case 1: Source is a nostr article (a tag) - kind:30023 or 30024
+    if let Some(addr) = &meta.source_article_addr {
+        let article_info = lookup_article_info(ndb, txn, addr);
+        return build_article_source_link(
+            addr,
+            article_info.as_ref(),
+            meta.source_article_bech32.as_deref(),
+        );
+    }
+
+    // Case 2: Source is a nostr note (e tag) - kind:1
+    if let Some(event_id) = &meta.source_event_id {
+        return build_note_source_link(event_id, meta.source_event_bech32.as_deref());
+    }
+
+    // Case 3: Source is a web URL (r tag)
+    if let Some(url) = &meta.source_url {
+        return build_url_source_link(url);
+    }
+
+    // No source found
+    String::new()
+}
+
+/// Article info retrieved from nostrdb for display in highlight sources.
+struct ArticleInfo {
+    title: Option<String>,
+    author_name: Option<String>,
+}
+
+/// Looks up an article's title and author name from nostrdb given its address.
+/// Returns None if the article is not found.
+fn lookup_article_info(ndb: &Ndb, txn: &Transaction, addr: &str) -> Option<ArticleInfo> {
+    // Parse address format: "{kind}:{pubkey}:{d-identifier}"
+    let parts: Vec<&str> = addr.splitn(3, ':').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let kind_str = parts[0];
+    let pubkey_hex = parts[1];
+    let d_identifier = parts[2];
+
+    // Parse kind
+    let kind: u64 = kind_str.parse().ok()?;
+
+    // Parse pubkey from hex
+    let pubkey_bytes = hex::decode(pubkey_hex).ok()?;
+    let pubkey: [u8; 32] = pubkey_bytes.try_into().ok()?;
+
+    // Build filter for the article
+    let filter = Filter::new()
+        .authors([&pubkey])
+        .kinds([kind])
+        .build();
+
+    // Query nostrdb for the article
+    let results = ndb.query(txn, &[filter], 10).ok()?;
+
+    // Find the article with matching d-tag
+    for result in results {
+        let mut found_d_match = false;
+        for tag in result.note.tags() {
+            let mut iter = tag.into_iter();
+            let Some(tag_name) = iter.next().and_then(|n| n.variant().str()) else {
+                continue;
+            };
+            if tag_name != "d" {
+                continue;
+            }
+            let Some(d_value) = iter.next().and_then(|n| n.variant().str()) else {
+                continue;
+            };
+            if d_value == d_identifier {
+                found_d_match = true;
+                break;
+            }
+        }
+
+        if !found_d_match {
+            continue;
+        }
+
+        // Found the article - extract title
+        let mut title = None;
+        for tag in result.note.tags() {
+            let mut iter = tag.into_iter();
+            let Some(tag_name) = iter.next().and_then(|n| n.variant().str()) else {
+                continue;
+            };
+            if tag_name == "title" {
+                if let Some(t) = iter.next().and_then(|n| n.variant().str()) {
+                    if !t.trim().is_empty() {
+                        title = Some(t.to_owned());
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Look up author's profile name
+        let author_name = ndb
+            .get_profile_by_pubkey(txn, &pubkey)
+            .ok()
+            .and_then(|profile_rec| {
+                profile_rec
+                    .record()
+                    .profile()
+                    .and_then(|p| p.name().or_else(|| p.display_name()))
+                    .map(|n| n.to_owned())
+            });
+
+        return Some(ArticleInfo { title, author_name });
+    }
+
+    None
+}
+
+/// Builds source link for an article reference (a tag).
+/// Uses original_bech32 when available to preserve relay hints.
+/// Falls back to generating naddr from addr if no bech32 provided.
+fn build_article_source_link(
+    addr: &str,
+    article_info: Option<&ArticleInfo>,
+    original_bech32: Option<&str>,
+) -> String {
+    // Use original bech32 if available (preserves relay hints)
+    let naddr = if let Some(bech32) = original_bech32 {
+        bech32.to_owned()
+    } else {
+        // Fallback: generate naddr without relay hints
+        let parts: Vec<&str> = addr.splitn(3, ':').collect();
+        if parts.len() < 3 {
+            return String::new();
+        }
+
+        let kind_str = parts[0];
+        let pubkey_hex = parts[1];
+        let d_identifier = parts[2];
+
+        let Ok(kind) = kind_str.parse::<u16>() else {
+            return String::new();
+        };
+
+        let Ok(pubkey) = PublicKey::from_hex(pubkey_hex) else {
+            return String::new();
+        };
+
+        use nostr_sdk::prelude::{Coordinate, Kind};
+        let coordinate = Coordinate::new(Kind::from(kind), pubkey).identifier(d_identifier);
+        let Ok(naddr_str) = coordinate.to_bech32() else {
+            return String::new();
+        };
+        naddr_str
+    };
+
+    // Build display text: "Title by Author" or just "Title" or abbreviated naddr
+    let display_text = match article_info {
+        Some(info) => {
+            let title = info.title.as_deref().filter(|t| !t.trim().is_empty());
+            let author = info.author_name.as_deref().filter(|a| !a.trim().is_empty());
+
+            match (title, author) {
+                (Some(t), Some(a)) => {
+                    let t_html = html_escape::encode_text(t);
+                    let a_html = html_escape::encode_text(a);
+                    format!("{t_html} by {a_html}")
+                }
+                (Some(t), None) => html_escape::encode_text(t).into_owned(),
+                (None, Some(a)) => {
+                    let a_html = html_escape::encode_text(a);
+                    format!("Article by {a_html}")
+                }
+                (None, None) => abbrev_str(&naddr).to_string(),
+            }
+        }
+        None => abbrev_str(&naddr).to_string(),
+    };
+
+    let href_raw = format!("/{naddr}");
+    let href = html_escape::encode_double_quoted_attribute(&href_raw);
+    format!(
+        r#"<div class="damus-highlight-source"><span class="damus-highlight-source-label">From article:</span> <a href="{href}">{display}</a></div>"#,
+        href = href,
+        display = display_text
+    )
+}
+
+/// Builds source link for a note reference (e tag).
+/// Uses original_bech32 when available to preserve relay hints.
+fn build_note_source_link(event_id: &[u8; 32], original_bech32: Option<&str>) -> String {
+    // Use original bech32 if available (preserves relay hints)
+    let nevent = if let Some(bech32) = original_bech32 {
+        bech32.to_owned()
+    } else {
+        // Fallback: generate nevent without relay hints
+        use nostr_sdk::prelude::EventId;
+        let Ok(id) = EventId::from_slice(event_id) else {
+            return String::new();
+        };
+        let Ok(nevent_str) = id.to_bech32() else {
+            return String::new();
+        };
+        nevent_str
+    };
+
+    let href_raw = format!("/{nevent}");
+    let href = html_escape::encode_double_quoted_attribute(&href_raw);
+    format!(
+        r#"<div class="damus-highlight-source"><span class="damus-highlight-source-label">From note:</span> <a href="{href}">{nevent_abbrev}</a></div>"#,
+        href = href,
+        nevent_abbrev = abbrev_str(&nevent)
+    )
+}
+
+/// Builds source link for a web URL (r tag).
+/// Extracts domain for display, links to full URL.
+fn build_url_source_link(url: &str) -> String {
+    // Extract domain from URL for display
+    let domain = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or(url);
+
+    let href = html_escape::encode_double_quoted_attribute(url);
+    let domain_html = html_escape::encode_text(domain);
+
+    format!(
+        r#"<div class="damus-highlight-source"><span class="damus-highlight-source-label">From:</span> <a href="{href}" target="_blank" rel="noopener noreferrer">{domain}</a></div>"#,
+        href = href,
+        domain = domain_html
     )
 }
 
@@ -1150,7 +2219,12 @@ pub fn serve_note_html(
     let mut timestamp_value = note.created_at();
     let mut og_type = "website";
 
+    // Route to appropriate renderer based on event kind:
+    // - kind 30023/30024: Long-form articles (NIP-23)
+    // - kind 9802: Highlights (NIP-84)
+    // - all other kinds: Regular notes
     let main_content_html = if matches!(note.kind(), 30023 | 30024) {
+        // NIP-23: Long-form content (articles)
         og_type = "article";
 
         let ArticleMetadata {
@@ -1204,9 +2278,49 @@ pub fn serve_note_html(
             summary_display_html.as_deref(),
             &article_body_html,
             &topics,
+            note.kind() == 30024, // is_draft: kind 30024 = unpublished draft
             &base_url,
         )
+    } else if note.kind() == 9802 {
+        // NIP-84: Highlights
+        // The note content is the highlighted text itself
+        let highlight_meta = extract_highlight_metadata(&note);
+
+        // For OG metadata, use abbreviated highlight text
+        display_title_raw = format!("Highlight by {}", profile_name_raw);
+        og_description_raw = collapse_whitespace(abbreviate(note.content(), 200));
+
+        // Escape the highlighted text for HTML display
+        let highlight_text_html = html_escape::encode_text(note.content())
+            .replace("\n", "<br/>");
+
+        // Escape context if present
+        let context_html = highlight_meta
+            .context
+            .as_deref()
+            .map(|ctx| html_escape::encode_text(ctx).into_owned());
+
+        // Escape comment if present (user's annotation on the highlight)
+        let comment_html = highlight_meta
+            .comment
+            .as_deref()
+            .map(|c| html_escape::encode_text(c).into_owned());
+
+        // Build source attribution (article link, note link, or URL)
+        // Pass ndb and txn so we can look up article titles
+        let source_markup = build_highlight_source_markup(&app.ndb, &txn, &highlight_meta);
+
+        build_highlight_content_html(
+            &profile,
+            &base_url,
+            timestamp_value,
+            &highlight_text_html,
+            context_html.as_deref(),
+            comment_html.as_deref(),
+            &source_markup,
+        )
     } else {
+        // Regular notes (kind 1, etc.)
         build_note_content_html(
             app,
             &note,

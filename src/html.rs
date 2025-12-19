@@ -1182,10 +1182,8 @@ fn build_note_content_html(
         base_url,
     );
     let timestamp_attr = note.created_at().to_string();
-    let nevent = Nip19Event::new(
-        EventId::from_byte_array(note.id().to_owned()),
-        relays.iter().map(|r| r.to_string()),
-    );
+    let nevent = Nip19Event::new(EventId::from_byte_array(note.id().to_owned()))
+        .relays(relays.iter().cloned());
     let note_id = nevent.to_bech32().unwrap();
 
     // Extract quote refs from q tags (NIP-18) and inline mentions
@@ -2303,7 +2301,19 @@ pub fn serve_note_html(
         profile_record,
     );
 
-    let note_bech32 = nip19.to_bech32().unwrap();
+    // Generate bech32 with source relay hints for better discoverability.
+    // This applies to all event types (notes, articles, highlights).
+    // Falls back to original nip19 encoding if relay-enhanced encoding fails.
+    let note_bech32 = match crate::nip19::bech32_with_relays(nip19, &note_rd.source_relays) {
+        Some(bech32) => bech32,
+        None => {
+            warn!("failed to encode bech32 with relays for nip19: {:?}, falling back to original", nip19);
+            metrics::counter!("bech32_encode_fallback_total", 1);
+            nip19.to_bech32().map_err(|e| {
+                Error::Generic(format!("failed to encode nip19: {}", e))
+            })?
+        }
+    };
     let base_url = get_base_url();
     let canonical_url = format!("{}/{}", base_url, note_bech32);
     let fallback_image_url = format!("{}/{}.png", base_url, note_bech32);
@@ -2416,14 +2426,13 @@ pub fn serve_note_html(
         )
     } else {
         // Regular notes (kind 1, etc.)
-        build_note_content_html(
-            app,
-            &note,
-            &txn,
-            &base_url,
-            &profile,
-            &crate::nip19::nip19_relays(nip19),
-        )
+        // Use source relays from fetch if available, otherwise fall back to nip19 relay hints
+        let relays = if note_rd.source_relays.is_empty() {
+            crate::nip19::nip19_relays(nip19)
+        } else {
+            note_rd.source_relays.clone()
+        };
+        build_note_content_html(app, &note, &txn, &base_url, &profile, &relays)
     };
 
     if og_description_raw.is_empty() {

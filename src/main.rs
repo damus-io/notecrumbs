@@ -412,7 +412,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         RelayPool::new(
             keys.clone(),
             &["wss://relay.damus.io", "wss://nostr.wine", "wss://nos.lol"],
-            timeout,
         )
         .await?,
     );

@@ -915,40 +915,76 @@ fn build_embedded_quotes_html(
             .unwrap_or_default();
 
         // Build content preview, type indicator, and content class based on note kind
-        let (content_preview, is_truncated, type_indicator, content_class) = match quoted_note.kind() {
-            // For articles, show title instead of body content
+        // For articles, we use a special card layout with image, title, summary, word count
+        let (content_preview, is_truncated, type_indicator, content_class, article_card) = match quoted_note.kind() {
+            // For articles, extract metadata and build card layout
             30023 | 30024 => {
                 let mut title: Option<&str> = None;
+                let mut image: Option<&str> = None;
+                let mut summary: Option<&str> = None;
+
                 for tag in quoted_note.tags() {
                     let mut iter = tag.into_iter();
                     let Some(tag_name) = iter.next().and_then(|n| n.variant().str()) else {
                         continue;
                     };
-                    if tag_name == "title" {
-                        title = iter.next().and_then(|n| n.variant().str());
-                        break;
+                    let tag_value = iter.next().and_then(|n| n.variant().str());
+                    match tag_name {
+                        "title" => title = tag_value,
+                        "image" => image = tag_value.filter(|s| !s.is_empty()),
+                        "summary" => summary = tag_value.filter(|s| !s.is_empty()),
+                        _ => {}
                     }
                 }
-                let indicator = if quoted_note.kind() == 30024 {
-                    r#"<span class="damus-embedded-quote-type damus-embedded-quote-type-draft">Draft</span>"#
-                } else {
-                    r#"<span class="damus-embedded-quote-type">Article</span>"#
-                };
-                (title.unwrap_or("Untitled article").to_string(), false, indicator, "")
+
+                // Calculate word count
+                let word_count = quoted_note.content().split_whitespace().count();
+                let word_count_text = format!("{} Words", word_count);
+
+                // Build article card HTML
+                let title_text = title.unwrap_or("Untitled article");
+                let title_html = html_escape::encode_text(title_text);
+
+                let image_html = image
+                    .map(|url| {
+                        let url_attr = html_escape::encode_double_quoted_attribute(url);
+                        format!(r#"<img src="{}" class="damus-embedded-article-image" alt="" />"#, url_attr)
+                    })
+                    .unwrap_or_default();
+
+                let summary_html = summary
+                    .map(|s| {
+                        let text = html_escape::encode_text(abbreviate(s, 150));
+                        format!(r#"<div class="damus-embedded-article-summary">{}</div>"#, text)
+                    })
+                    .unwrap_or_default();
+
+                let draft_class = if quoted_note.kind() == 30024 { " damus-embedded-article-draft" } else { "" };
+
+                let card_html = format!(
+                    r#"{image}<div class="damus-embedded-article-title{draft}">{title}</div>{summary}<div class="damus-embedded-article-wordcount">{words}</div>"#,
+                    image = image_html,
+                    draft = draft_class,
+                    title = title_html,
+                    summary = summary_html,
+                    words = word_count_text
+                );
+
+                (String::new(), false, "", " damus-embedded-quote-article", Some(card_html))
             }
             // For highlights, show the highlighted text with left border styling (no tag needed)
             9802 => {
                 let full_content = quoted_note.content();
                 let content = abbreviate(full_content, 200);
                 let truncated = content.len() < full_content.len();
-                (content.to_string(), truncated, "", " damus-embedded-quote-highlight")
+                (content.to_string(), truncated, "", " damus-embedded-quote-highlight", None)
             }
             // For regular notes, show abbreviated content
             _ => {
                 let full_content = quoted_note.content();
                 let content = abbreviate(full_content, 280);
                 let truncated = content.len() < full_content.len();
-                (content.to_string(), truncated, "", "")
+                (content.to_string(), truncated, "", "", None)
             }
         };
         let content_html = html_escape::encode_text(&content_preview).replace("\n", " ");
@@ -960,15 +996,29 @@ fn build_embedded_quotes_html(
             ""
         };
 
-        // URL pills disabled for now
-        let url_pills_html = String::new();
-
         // Build link to quoted note
         let link = build_quote_link(quote_ref);
 
+        // For articles, use card layout; for other types, use regular content layout
+        let body_html = if let Some(card) = article_card {
+            card
+        } else {
+            let show_more = if is_truncated {
+                r#" <span class="damus-embedded-quote-showmore">Show more</span>"#
+            } else {
+                ""
+            };
+            format!(
+                r#"<div class="damus-embedded-quote-content{class}">{content}{showmore}</div>"#,
+                class = content_class,
+                content = content_html,
+                showmore = show_more
+            )
+        };
+
         let _ = write!(
             quotes_html,
-            r#"<a href="{link}" class="damus-embedded-quote">
+            r#"<a href="{link}" class="damus-embedded-quote{content_class}">
                 <div class="damus-embedded-quote-header">
                     {pfp}
                     <span class="damus-embedded-quote-author">{name}</span>{username}
@@ -976,20 +1026,17 @@ fn build_embedded_quotes_html(
                     {type_indicator}
                 </div>
                 {reply}
-                <div class="damus-embedded-quote-content{content_class}">{content} {showmore}</div>
-                {urls}
+                {body}
             </a>"#,
             link = link,
+            content_class = content_class,
             pfp = pfp_html,
             name = display_name_html,
             username = username_html,
             time = time_html,
             type_indicator = type_indicator,
             reply = reply_html,
-            content_class = content_class,
-            content = content_html,
-            showmore = show_more_html,
-            urls = url_pills_html
+            body = body_html
         );
     }
 

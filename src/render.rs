@@ -361,6 +361,57 @@ pub async fn find_note(
     Ok(())
 }
 
+/// Fetch the latest profile metadata (kind 0) from relays and update nostrdb.
+///
+/// Profile metadata is a replaceable event (NIP-01) - nostrdb keeps only the
+/// newest version by `created_at` timestamp. This function queries relays for
+/// the latest kind 0 event to ensure cached profile data stays fresh during
+/// background refreshes.
+async fn fetch_profile_metadata(
+    relay_pool: Arc<RelayPool>,
+    ndb: Ndb,
+    relays: Vec<RelayUrl>,
+    pubkey: [u8; 32],
+) {
+    use nostr_sdk::JsonUtil;
+
+    if relays.is_empty() {
+        return;
+    }
+
+    let filter = {
+        let author_ref = [&pubkey];
+        convert_filter(
+            &nostrdb::Filter::new()
+                .authors(author_ref)
+                .kinds([0])
+                .limit(1)
+                .build(),
+        )
+    };
+
+    let stream = relay_pool
+        .stream_events(vec![filter], &relays, Duration::from_millis(2000))
+        .await;
+
+    let mut stream = match stream {
+        Ok(s) => s,
+        Err(err) => {
+            warn!("failed to stream profile metadata: {err}");
+            return;
+        }
+    };
+
+    // Process all returned events - nostrdb handles deduplication and keeps newest.
+    // Note: we skip ensure_relay_hints here because kind 0 profile metadata doesn't
+    // contain relay hints (unlike kind 1 notes which may have 'r' tags).
+    while let Some(event) = stream.next().await {
+        if let Err(err) = ndb.process_event(&event.as_json()) {
+            error!("error processing profile metadata event: {err}");
+        }
+    }
+}
+
 pub async fn fetch_profile_feed(
     relay_pool: Arc<RelayPool>,
     ndb: Ndb,
@@ -368,7 +419,13 @@ pub async fn fetch_profile_feed(
 ) -> Result<()> {
     let relay_targets = collect_profile_relays(relay_pool.clone(), ndb.clone(), pubkey).await?;
 
-    let relay_targets_arc = Arc::new(relay_targets);
+    // Spawn metadata fetch in parallel - best-effort, don't block note refresh
+    tokio::spawn(fetch_profile_metadata(
+        relay_pool.clone(),
+        ndb.clone(),
+        relay_targets.clone(),
+        pubkey,
+    ));
 
     let cutoff = SystemTime::now()
         .checked_sub(Duration::from_secs(
@@ -380,7 +437,7 @@ pub async fn fetch_profile_feed(
     let mut fetched = stream_profile_feed_once(
         relay_pool.clone(),
         ndb.clone(),
-        relay_targets_arc.clone(),
+        &relay_targets,
         pubkey,
         cutoff,
     )
@@ -390,7 +447,7 @@ pub async fn fetch_profile_feed(
         fetched = stream_profile_feed_once(
             relay_pool.clone(),
             ndb.clone(),
-            relay_targets_arc.clone(),
+            &relay_targets,
             pubkey,
             None,
         )
@@ -727,7 +784,7 @@ async fn collect_profile_relays(
 async fn stream_profile_feed_once(
     relay_pool: Arc<RelayPool>,
     ndb: Ndb,
-    relays: Arc<Vec<RelayUrl>>,
+    relays: &[RelayUrl],
     pubkey: [u8; 32],
     since: Option<u64>,
 ) -> Result<usize> {
@@ -745,7 +802,7 @@ async fn stream_profile_feed_once(
         convert_filter(&builder.build())
     };
     let mut stream = relay_pool
-        .stream_events(vec![filter], &relays, Duration::from_millis(2000))
+        .stream_events(vec![filter], relays, Duration::from_millis(2000))
         .await?;
 
     let mut fetched = 0usize;

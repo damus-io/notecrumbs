@@ -25,7 +25,7 @@ static BASE_URL: OnceLock<String> = OnceLock::new();
 /// Logs a warning once if not explicitly configured
 fn get_base_url() -> &'static str {
     BASE_URL.get_or_init(|| {
-        match std::env::var("NOTECRUMBS_BASE_URL") {
+        let url = match std::env::var("NOTECRUMBS_BASE_URL") {
             Ok(url) => url,
             Err(_) => {
                 tracing::warn!(
@@ -34,8 +34,13 @@ fn get_base_url() -> &'static str {
                 );
                 "https://damus.io".to_string()
             }
-        }
+        };
+        normalize_base_url(&url)
     })
+}
+
+fn normalize_base_url(url: &str) -> String {
+    url.trim_end_matches('/').to_string()
 }
 
 /// Calculate Unix timestamp for N days ago
@@ -277,6 +282,7 @@ pub fn generate_robots_txt() -> String {
     format!(
         "User-agent: *\n\
          Allow: /\n\
+         Allow: /.well-known/nostr.json\n\
          Disallow: /metrics\n\
          Disallow: /*.json\n\
          \n\
@@ -311,6 +317,30 @@ mod tests {
         assert!(is_leap_year(2024));
         assert!(!is_leap_year(1900));
         assert!(!is_leap_year(2023));
+    }
+
+    #[test]
+    fn test_normalize_base_url() {
+        assert_eq!(normalize_base_url("https://example.com/"), "https://example.com");
+        assert_eq!(normalize_base_url("https://example.com"), "https://example.com");
+    }
+
+    #[test]
+    fn test_days_ago_range() {
+        let start = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let cutoff = days_ago(1);
+        let end = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let start_cutoff = start.saturating_sub(86400);
+        let end_cutoff = end.saturating_sub(86400);
+        assert!(cutoff >= start_cutoff);
+        assert!(cutoff <= end_cutoff);
     }
 
     #[test]

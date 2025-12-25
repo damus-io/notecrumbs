@@ -6,6 +6,7 @@
 use nostr_sdk::ToBech32;
 use nostrdb::{Filter, Ndb, Transaction};
 use std::fmt::Write;
+use std::time::Instant;
 
 /// Maximum URLs per sitemap (XML sitemap standard limit is 50,000)
 const MAX_SITEMAP_URLS: u64 = 10000;
@@ -90,10 +91,14 @@ struct SitemapEntry {
 
 /// Generate sitemap XML from cached events in nostrdb
 pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
+    let start = Instant::now();
     let base_url = get_base_url();
     let txn = Transaction::new(ndb)?;
 
     let mut entries: Vec<SitemapEntry> = Vec::new();
+    let mut notes_count: u64 = 0;
+    let mut articles_count: u64 = 0;
+    let mut profiles_count: u64 = 0;
 
     // Add homepage
     entries.push(SitemapEntry {
@@ -124,6 +129,7 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
                         priority: "0.8",
                         changefreq: "weekly",
                     });
+                    notes_count += 1;
                 }
             }
         }
@@ -159,6 +165,7 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
                             priority: "0.9",
                             changefreq: "weekly",
                         });
+                        articles_count += 1;
                     }
                 }
             }
@@ -181,6 +188,7 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
                         priority: "0.7",
                         changefreq: "weekly",
                     });
+                    profiles_count += 1;
                 }
             }
         }
@@ -191,7 +199,7 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
     xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     xml.push_str("<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
 
-    for entry in entries {
+    for entry in &entries {
         let _ = write!(
             xml,
             "  <url>\n    <loc>{}</loc>\n    <lastmod>{}</lastmod>\n    <changefreq>{}</changefreq>\n    <priority>{}</priority>\n  </url>\n",
@@ -200,6 +208,15 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
     }
 
     xml.push_str("</urlset>\n");
+
+    // Record metrics (aggregate stats, not user-tracking)
+    let duration = start.elapsed();
+    metrics::counter!("sitemap_generations_total", 1);
+    metrics::gauge!("sitemap_generation_duration_seconds", duration.as_secs_f64());
+    metrics::gauge!("sitemap_urls_total", entries.len() as f64);
+    metrics::gauge!("sitemap_notes_count", notes_count as f64);
+    metrics::gauge!("sitemap_articles_count", articles_count as f64);
+    metrics::gauge!("sitemap_profiles_count", profiles_count as f64);
 
     Ok(xml)
 }

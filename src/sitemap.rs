@@ -11,9 +11,31 @@ use std::time::Instant;
 /// Maximum URLs per sitemap (XML sitemap standard limit is 50,000)
 const MAX_SITEMAP_URLS: u64 = 10000;
 
+/// Default lookback period for sitemap entries (90 days)
+const SITEMAP_LOOKBACK_DAYS: u64 = 90;
+
 /// Get the base URL from environment or default
+/// Logs a warning if not explicitly configured
 fn get_base_url() -> String {
-    std::env::var("NOTECRUMBS_BASE_URL").unwrap_or_else(|_| "https://damus.io".to_string())
+    match std::env::var("NOTECRUMBS_BASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            tracing::warn!(
+                "NOTECRUMBS_BASE_URL not set, defaulting to https://damus.io - \
+                 sitemap/robots.txt may point to wrong domain"
+            );
+            "https://damus.io".to_string()
+        }
+    }
+}
+
+/// Calculate Unix timestamp for N days ago
+fn days_ago(days: u64) -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_sub(days * 24 * 60 * 60)
 }
 
 /// Escape special XML characters in a string
@@ -114,7 +136,13 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
     });
 
     // Query recent notes (kind:1 - short text notes)
-    let notes_filter = Filter::new().kinds([1]).limit(MAX_SITEMAP_URLS).build();
+    // Use since filter to prioritize recent content for SEO freshness
+    let since_cutoff = days_ago(SITEMAP_LOOKBACK_DAYS);
+    let notes_filter = Filter::new()
+        .kinds([1])
+        .since(since_cutoff)
+        .limit(MAX_SITEMAP_URLS)
+        .build();
 
     if let Ok(results) = ndb.query(&txn, &[notes_filter], MAX_SITEMAP_URLS as i32) {
         for result in results {
@@ -138,6 +166,7 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
     // Query long-form articles (kind:30023)
     let articles_filter = Filter::new()
         .kinds([30023])
+        .since(since_cutoff)
         .limit(MAX_SITEMAP_URLS)
         .build();
 
@@ -148,13 +177,21 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
                 let pubkey = nostr_sdk::PublicKey::from_slice(note.pubkey()).ok();
                 let kind = nostr::Kind::from(note.kind() as u16);
 
-                // Extract d-tag identifier
+                // Extract d-tag identifier - skip if missing or empty to avoid
+                // ambiguous URLs and potential collisions across authors
                 let identifier = note
                     .tags()
                     .iter()
                     .find(|tag| tag.count() >= 2 && tag.get_unchecked(0).variant().str() == Some("d"))
-                    .and_then(|tag| tag.get_unchecked(1).variant().str())
-                    .unwrap_or("");
+                    .and_then(|tag| tag.get_unchecked(1).variant().str());
+
+                // Only include articles with valid non-empty d-tag
+                let Some(identifier) = identifier else {
+                    continue;
+                };
+                if identifier.is_empty() {
+                    continue;
+                }
 
                 if let Some(pk) = pubkey {
                     let coord = nostr::nips::nip01::Coordinate::new(kind, pk).identifier(identifier);
@@ -173,7 +210,11 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
     }
 
     // Query profiles (kind:0 - metadata)
-    let profiles_filter = Filter::new().kinds([0]).limit(MAX_SITEMAP_URLS).build();
+    // No since filter for profiles - they update less frequently
+    let profiles_filter = Filter::new()
+        .kinds([0])
+        .limit(MAX_SITEMAP_URLS)
+        .build();
 
     if let Ok(results) = ndb.query(&txn, &[profiles_filter], MAX_SITEMAP_URLS as i32) {
         for result in results {

@@ -157,23 +157,23 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
         .limit(MAX_SITEMAP_URLS)
         .build();
 
-    if let Ok(results) = ndb.query(&txn, &[notes_filter], MAX_SITEMAP_URLS as i32) {
-        for result in results {
-            if let Ok(note) = ndb.get_note_by_key(&txn, result.note_key) {
-                let event_id = nostr_sdk::EventId::from_slice(note.id()).ok();
-                if let Some(eid) = event_id {
-                    // to_bech32() returns Result<String, Infallible>, so unwrap is safe
-                    let bech32 = eid.to_bech32().unwrap();
-                    entries.push(SitemapEntry {
-                        loc: format!("{}/{}", base_url, xml_escape(&bech32)),
-                        lastmod: format_lastmod(note.created_at()),
-                        priority: "0.8",
-                        changefreq: "weekly",
-                    });
-                    notes_count += 1;
-                }
-            }
-        }
+    let results = ndb.query(&txn, &[notes_filter], MAX_SITEMAP_URLS as i32).unwrap_or_default();
+    for result in results {
+        let Ok(note) = ndb.get_note_by_key(&txn, result.note_key) else {
+            continue;
+        };
+        let Some(eid) = nostr_sdk::EventId::from_slice(note.id()).ok() else {
+            continue;
+        };
+        // to_bech32() returns Result<String, Infallible>, so unwrap is safe
+        let bech32 = eid.to_bech32().unwrap();
+        entries.push(SitemapEntry {
+            loc: format!("{}/{}", base_url, xml_escape(&bech32)),
+            lastmod: format_lastmod(note.created_at()),
+            priority: "0.8",
+            changefreq: "weekly",
+        });
+        notes_count += 1;
     }
 
     // Query long-form articles (kind:30023)
@@ -184,43 +184,45 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
         .limit(MAX_SITEMAP_URLS)
         .build();
 
-    if let Ok(results) = ndb.query(&txn, &[articles_filter], MAX_SITEMAP_URLS as i32) {
-        for result in results {
-            if let Ok(note) = ndb.get_note_by_key(&txn, result.note_key) {
-                // For addressable events, we need to create naddr
-                let pubkey = nostr_sdk::PublicKey::from_slice(note.pubkey()).ok();
-                let kind = nostr::Kind::from(note.kind() as u16);
+    let results = ndb.query(&txn, &[articles_filter], MAX_SITEMAP_URLS as i32).unwrap_or_default();
+    for result in results {
+        let Ok(note) = ndb.get_note_by_key(&txn, result.note_key) else {
+            continue;
+        };
 
-                // Extract d-tag identifier - skip if missing or empty to avoid
-                // ambiguous URLs and potential collisions across authors
-                let identifier = note
-                    .tags()
-                    .iter()
-                    .find(|tag| tag.count() >= 2 && tag.get_unchecked(0).variant().str() == Some("d"))
-                    .and_then(|tag| tag.get_unchecked(1).variant().str());
+        // Extract d-tag identifier - skip if missing or empty to avoid
+        // ambiguous URLs and potential collisions across authors
+        let identifier = note
+            .tags()
+            .iter()
+            .find(|tag| tag.count() >= 2 && tag.get_unchecked(0).variant().str() == Some("d"))
+            .and_then(|tag| tag.get_unchecked(1).variant().str());
 
-                // Only include articles with valid non-empty d-tag
-                let Some(identifier) = identifier else {
-                    continue;
-                };
-                if identifier.is_empty() {
-                    continue;
-                }
-
-                if let Some(pk) = pubkey {
-                    let coord = nostr::nips::nip01::Coordinate::new(kind, pk).identifier(identifier);
-                    if let Ok(bech32) = coord.to_bech32() {
-                        entries.push(SitemapEntry {
-                            loc: format!("{}/{}", base_url, xml_escape(&bech32)),
-                            lastmod: format_lastmod(note.created_at()),
-                            priority: "0.9",
-                            changefreq: "weekly",
-                        });
-                        articles_count += 1;
-                    }
-                }
-            }
+        let Some(identifier) = identifier else {
+            continue;
+        };
+        if identifier.is_empty() {
+            continue;
         }
+
+        let Some(pk) = nostr_sdk::PublicKey::from_slice(note.pubkey()).ok() else {
+            continue;
+        };
+
+        // For addressable events, create naddr
+        let kind = nostr::Kind::from(note.kind() as u16);
+        let coord = nostr::nips::nip01::Coordinate::new(kind, pk).identifier(identifier);
+        let Ok(bech32) = coord.to_bech32() else {
+            continue;
+        };
+
+        entries.push(SitemapEntry {
+            loc: format!("{}/{}", base_url, xml_escape(&bech32)),
+            lastmod: format_lastmod(note.created_at()),
+            priority: "0.9",
+            changefreq: "weekly",
+        });
+        articles_count += 1;
     }
 
     // Query profiles (kind:0 - metadata)
@@ -230,23 +232,23 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
         .limit(MAX_SITEMAP_URLS)
         .build();
 
-    if let Ok(results) = ndb.query(&txn, &[profiles_filter], MAX_SITEMAP_URLS as i32) {
-        for result in results {
-            if let Ok(note) = ndb.get_note_by_key(&txn, result.note_key) {
-                let pubkey = nostr_sdk::PublicKey::from_slice(note.pubkey()).ok();
-                if let Some(pk) = pubkey {
-                    // to_bech32() returns Result<String, Infallible>, so unwrap is safe
-                    let bech32 = pk.to_bech32().unwrap();
-                    entries.push(SitemapEntry {
-                        loc: format!("{}/{}", base_url, xml_escape(&bech32)),
-                        lastmod: format_lastmod(note.created_at()),
-                        priority: "0.7",
-                        changefreq: "weekly",
-                    });
-                    profiles_count += 1;
-                }
-            }
-        }
+    let results = ndb.query(&txn, &[profiles_filter], MAX_SITEMAP_URLS as i32).unwrap_or_default();
+    for result in results {
+        let Ok(note) = ndb.get_note_by_key(&txn, result.note_key) else {
+            continue;
+        };
+        let Some(pk) = nostr_sdk::PublicKey::from_slice(note.pubkey()).ok() else {
+            continue;
+        };
+        // to_bech32() returns Result<String, Infallible>, so unwrap is safe
+        let bech32 = pk.to_bech32().unwrap();
+        entries.push(SitemapEntry {
+            loc: format!("{}/{}", base_url, xml_escape(&bech32)),
+            lastmod: format_lastmod(note.created_at()),
+            priority: "0.7",
+            changefreq: "weekly",
+        });
+        profiles_count += 1;
     }
 
     // Build XML

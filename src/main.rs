@@ -33,6 +33,7 @@ mod nip19;
 mod pfp;
 mod relay_pool;
 mod render;
+mod sitemap;
 mod unknowns;
 
 use relay_pool::RelayPool;
@@ -139,6 +140,31 @@ async fn serve(
         }
         "/" => {
             return html::serve_homepage(r);
+        }
+        "/robots.txt" => {
+            let body = sitemap::generate_robots_txt();
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .header(header::CACHE_CONTROL, "public, max-age=86400")
+                .body(Full::new(Bytes::from(body)))?);
+        }
+        "/sitemap.xml" => {
+            match sitemap::generate_sitemap(&app.ndb) {
+                Ok(xml) => {
+                    return Ok(Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
+                        .header(header::CACHE_CONTROL, "public, max-age=3600")
+                        .body(Full::new(Bytes::from(xml)))?);
+                }
+                Err(err) => {
+                    error!("Failed to generate sitemap: {err}");
+                    return Ok(Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Full::new(Bytes::from("Failed to generate sitemap\n")))?);
+                }
+            }
         }
         _ => {}
     }

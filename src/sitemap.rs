@@ -6,27 +6,36 @@
 use nostr_sdk::ToBech32;
 use nostrdb::{Filter, Ndb, Transaction};
 use std::fmt::Write;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 /// Maximum URLs per sitemap (XML sitemap standard limit is 50,000)
 const MAX_SITEMAP_URLS: u64 = 10000;
 
-/// Default lookback period for sitemap entries (90 days)
-const SITEMAP_LOOKBACK_DAYS: u64 = 90;
+/// Lookback period for notes (90 days) - shorter for timely content
+const NOTES_LOOKBACK_DAYS: u64 = 90;
+
+/// Lookback period for articles (365 days) - longer for evergreen content
+const ARTICLES_LOOKBACK_DAYS: u64 = 365;
+
+/// Cached base URL (computed once at first access)
+static BASE_URL: OnceLock<String> = OnceLock::new();
 
 /// Get the base URL from environment or default
-/// Logs a warning if not explicitly configured
-fn get_base_url() -> String {
-    match std::env::var("NOTECRUMBS_BASE_URL") {
-        Ok(url) => url,
-        Err(_) => {
-            tracing::warn!(
-                "NOTECRUMBS_BASE_URL not set, defaulting to https://damus.io - \
-                 sitemap/robots.txt may point to wrong domain"
-            );
-            "https://damus.io".to_string()
+/// Logs a warning once if not explicitly configured
+fn get_base_url() -> &'static str {
+    BASE_URL.get_or_init(|| {
+        match std::env::var("NOTECRUMBS_BASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                tracing::warn!(
+                    "NOTECRUMBS_BASE_URL not set, defaulting to https://damus.io - \
+                     sitemap/robots.txt may point to wrong domain"
+                );
+                "https://damus.io".to_string()
+            }
         }
-    }
+    })
 }
 
 /// Calculate Unix timestamp for N days ago
@@ -124,7 +133,7 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
 
     // Add homepage
     entries.push(SitemapEntry {
-        loc: base_url.clone(),
+        loc: base_url.to_string(),
         lastmod: format_lastmod(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -137,10 +146,9 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
 
     // Query recent notes (kind:1 - short text notes)
     // Use since filter to prioritize recent content for SEO freshness
-    let since_cutoff = days_ago(SITEMAP_LOOKBACK_DAYS);
     let notes_filter = Filter::new()
         .kinds([1])
-        .since(since_cutoff)
+        .since(days_ago(NOTES_LOOKBACK_DAYS))
         .limit(MAX_SITEMAP_URLS)
         .build();
 
@@ -164,9 +172,10 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
     }
 
     // Query long-form articles (kind:30023)
+    // Longer lookback for evergreen content
     let articles_filter = Filter::new()
         .kinds([30023])
-        .since(since_cutoff)
+        .since(days_ago(ARTICLES_LOOKBACK_DAYS))
         .limit(MAX_SITEMAP_URLS)
         .build();
 

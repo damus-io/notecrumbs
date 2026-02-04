@@ -261,6 +261,9 @@ pub(crate) fn convert_filter(ndb_filter: &nostrdb::Filter) -> nostr::Filter {
             FilterField::Limit(limit) => {
                 filter.limit = Some(limit as usize);
             }
+
+            // Ignore new filter fields we don't handle
+            FilterField::Search(_) | FilterField::Relays(_) | FilterField::Custom(_) => {}
         }
     }
 
@@ -280,8 +283,7 @@ fn build_address_filter(author: &[u8; 32], kind: u64, identifier: &str) -> nostr
     let author_ref: [&[u8; 32]; 1] = [author];
     let mut filter = nostrdb::Filter::new().authors(author_ref).kinds([kind]);
     if !identifier.is_empty() {
-        let ident = identifier.to_string();
-        filter = filter.tags(vec![ident], 'd');
+        filter = filter.tags([identifier], 'd');
     }
     filter.limit(1).build()
 }
@@ -295,10 +297,11 @@ fn query_note_by_address<'a>(
 ) -> std::result::Result<Note<'a>, nostrdb::Error> {
     let mut results = ndb.query(txn, &[build_address_filter(author, kind, identifier)], 1)?;
     if results.is_empty() && !identifier.is_empty() {
+        let coord_tag = coordinate_tag(author, kind, identifier);
         let coord_filter = nostrdb::Filter::new()
             .authors([author])
             .kinds([kind])
-            .tags(vec![coordinate_tag(author, kind, identifier)], 'a')
+            .tags([coord_tag.as_str()], 'a')
             .limit(1)
             .build();
         results = ndb.query(txn, &[coord_filter], 1)?;

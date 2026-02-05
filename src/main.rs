@@ -192,9 +192,7 @@ async fn serve(
     if let RenderData::Note(note_rd) = &render_data {
         if let Some(unknowns) = render::collect_note_unknowns(&app.ndb, &note_rd.note_rd) {
             tracing::debug!("fetching {} unknowns", unknowns.ids_len());
-            if let Err(err) =
-                render::fetch_unknowns(&app.relay_pool, &app.ndb, unknowns).await
-            {
+            if let Err(err) = render::fetch_unknowns(&app.relay_pool, &app.ndb, unknowns).await {
                 tracing::warn!("failed to fetch unknowns: {err}");
             }
         }

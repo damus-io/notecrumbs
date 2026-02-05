@@ -54,10 +54,7 @@ impl UnknownIds {
         }
 
         let unknown_id = UnknownId::NoteId(*id);
-        self.ids
-            .entry(unknown_id)
-            .or_default()
-            .extend(relays);
+        self.ids.entry(unknown_id).or_default().extend(relays);
     }
 
     /// Add a profile pubkey if it's not already in ndb.
@@ -119,7 +116,12 @@ impl UnknownIds {
     }
 
     /// Collect unknown IDs from quote refs.
-    pub fn collect_from_quote_refs(&mut self, ndb: &Ndb, txn: &Transaction, quote_refs: &[QuoteRef]) {
+    pub fn collect_from_quote_refs(
+        &mut self,
+        ndb: &Ndb,
+        txn: &Transaction,
+        quote_refs: &[QuoteRef],
+    ) {
         for quote_ref in quote_refs {
             match quote_ref {
                 QuoteRef::Event { id, relays, .. } => {
@@ -252,7 +254,12 @@ impl UnknownIds {
                 Mention::Note(note_mention) => {
                     match ndb.get_note_by_id(txn, note_mention.id()) {
                         Err(_) => {
-                            self.add_note_if_missing(ndb, txn, note_mention.id(), std::iter::empty());
+                            self.add_note_if_missing(
+                                ndb,
+                                txn,
+                                note_mention.id(),
+                                std::iter::empty(),
+                            );
                         }
                         Ok(found_note) => {
                             // Note found but maybe we need the author profile

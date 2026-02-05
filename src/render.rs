@@ -653,7 +653,11 @@ pub async fn fetch_unknowns(
     // Now we can await - nostrdb::Filter has been dropped
     relay_pool.ensure_relays(relay_targets.clone()).await?;
 
-    debug!("fetching {} unknowns from {:?}", nostr_filters.len(), relay_targets);
+    debug!(
+        "fetching {} unknowns from {:?}",
+        nostr_filters.len(),
+        relay_targets
+    );
 
     // Stream with shorter timeout since these are secondary fetches
     let mut stream = relay_pool

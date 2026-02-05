@@ -99,7 +99,9 @@ struct HighlightMetadata {
 /// Normalizes text for comparison by trimming whitespace and trailing punctuation.
 /// Used to detect when context and content are essentially the same text.
 fn normalize_for_comparison(s: &str) -> String {
-    s.trim().trim_end_matches(|c: char| c.is_ascii_punctuation()).to_lowercase()
+    s.trim()
+        .trim_end_matches(|c: char| c.is_ascii_punctuation())
+        .to_lowercase()
 }
 
 fn collapse_whitespace<S: AsRef<str>>(input: S) -> String {
@@ -686,7 +688,11 @@ pub fn collect_all_quote_refs(ndb: &Ndb, txn: &Transaction, note: &Note) -> Vec<
 }
 
 /// Looks up an article by address (kind:pubkey:d-tag) and returns the note key + optional title.
-fn lookup_article_by_addr(ndb: &Ndb, txn: &Transaction, addr: &str) -> Option<(NoteKey, Option<String>)> {
+fn lookup_article_by_addr(
+    ndb: &Ndb,
+    txn: &Transaction,
+    addr: &str,
+) -> Option<(NoteKey, Option<String>)> {
     let parts: Vec<&str> = addr.splitn(3, ':').collect();
     if parts.len() < 3 {
         return None;
@@ -803,7 +809,10 @@ fn build_embedded_quotes_html(ndb: &Ndb, txn: &Transaction, quote_refs: &[QuoteR
                         .filter(|s| !s.is_empty())
                         .or_else(|| p.name().filter(|s| !s.is_empty()))
                         .map(|n| n.to_owned());
-                    let handle = p.name().filter(|s| !s.is_empty()).map(|n| format!("@{}", n));
+                    let handle = p
+                        .name()
+                        .filter(|s| !s.is_empty())
+                        .map(|n| format!("@{}", n));
                     let picture = p.picture().filter(|s| !s.is_empty()).map(|s| s.to_owned());
                     (name, handle, picture)
                 })
@@ -843,8 +852,12 @@ fn build_embedded_quotes_html(ndb: &Ndb, txn: &Transaction, quote_refs: &[QuoteR
             .reply()
             .and_then(|reply_ref| ndb.get_note_by_id(txn, reply_ref.id).ok())
             .and_then(|parent| {
-                get_profile_display_name(ndb.get_profile_by_pubkey(txn, parent.pubkey()).ok().as_ref())
-                    .map(|name| format!("@{}", name))
+                get_profile_display_name(
+                    ndb.get_profile_by_pubkey(txn, parent.pubkey())
+                        .ok()
+                        .as_ref(),
+                )
+                .map(|name| format!("@{}", name))
             })
             .map(|name| {
                 format!(
@@ -855,76 +868,99 @@ fn build_embedded_quotes_html(ndb: &Ndb, txn: &Transaction, quote_refs: &[QuoteR
             .unwrap_or_default();
 
         // For articles, we use a special card layout with image, title, summary, word count
-        let (content_preview, is_truncated, type_indicator, content_class, article_card) = match quoted_note.kind() {
-            // For articles, extract metadata and build card layout
-            30023 | 30024 => {
-                let mut title: Option<&str> = None;
-                let mut image: Option<&str> = None;
-                let mut summary: Option<&str> = None;
+        let (content_preview, is_truncated, type_indicator, content_class, article_card) =
+            match quoted_note.kind() {
+                // For articles, extract metadata and build card layout
+                30023 | 30024 => {
+                    let mut title: Option<&str> = None;
+                    let mut image: Option<&str> = None;
+                    let mut summary: Option<&str> = None;
 
-                for tag in quoted_note.tags() {
-                    let mut iter = tag.into_iter();
-                    let Some(tag_name) = iter.next().and_then(|n| n.variant().str()) else {
-                        continue;
-                    };
-                    let tag_value = iter.next().and_then(|n| n.variant().str());
-                    match tag_name {
-                        "title" => title = tag_value,
-                        "image" => image = tag_value.filter(|s| !s.is_empty()),
-                        "summary" => summary = tag_value.filter(|s| !s.is_empty()),
-                        _ => {}
+                    for tag in quoted_note.tags() {
+                        let mut iter = tag.into_iter();
+                        let Some(tag_name) = iter.next().and_then(|n| n.variant().str()) else {
+                            continue;
+                        };
+                        let tag_value = iter.next().and_then(|n| n.variant().str());
+                        match tag_name {
+                            "title" => title = tag_value,
+                            "image" => image = tag_value.filter(|s| !s.is_empty()),
+                            "summary" => summary = tag_value.filter(|s| !s.is_empty()),
+                            _ => {}
+                        }
                     }
+
+                    // Calculate word count
+                    let word_count = quoted_note.content().split_whitespace().count();
+                    let word_count_text = format!("{} Words", word_count);
+
+                    // Build article card HTML
+                    let title_text = title.unwrap_or("Untitled article");
+                    let title_html = html_escape::encode_text(title_text);
+
+                    let image_html = image
+                        .map(|url| {
+                            let url_attr = html_escape::encode_double_quoted_attribute(url);
+                            format!(
+                                r#"<img src="{}" class="damus-embedded-article-image" alt="" />"#,
+                                url_attr
+                            )
+                        })
+                        .unwrap_or_default();
+
+                    let summary_html = summary
+                        .map(|s| {
+                            let text = html_escape::encode_text(abbreviate(s, 150));
+                            format!(
+                                r#"<div class="damus-embedded-article-summary">{}</div>"#,
+                                text
+                            )
+                        })
+                        .unwrap_or_default();
+
+                    let draft_class = if quoted_note.kind() == 30024 {
+                        " damus-embedded-article-draft"
+                    } else {
+                        ""
+                    };
+
+                    let card_html = format!(
+                        r#"{image}<div class="damus-embedded-article-title{draft}">{title}</div>{summary}<div class="damus-embedded-article-wordcount">{words}</div>"#,
+                        image = image_html,
+                        draft = draft_class,
+                        title = title_html,
+                        summary = summary_html,
+                        words = word_count_text
+                    );
+
+                    (
+                        String::new(),
+                        false,
+                        "",
+                        " damus-embedded-quote-article",
+                        Some(card_html),
+                    )
                 }
-
-                // Calculate word count
-                let word_count = quoted_note.content().split_whitespace().count();
-                let word_count_text = format!("{} Words", word_count);
-
-                // Build article card HTML
-                let title_text = title.unwrap_or("Untitled article");
-                let title_html = html_escape::encode_text(title_text);
-
-                let image_html = image
-                    .map(|url| {
-                        let url_attr = html_escape::encode_double_quoted_attribute(url);
-                        format!(r#"<img src="{}" class="damus-embedded-article-image" alt="" />"#, url_attr)
-                    })
-                    .unwrap_or_default();
-
-                let summary_html = summary
-                    .map(|s| {
-                        let text = html_escape::encode_text(abbreviate(s, 150));
-                        format!(r#"<div class="damus-embedded-article-summary">{}</div>"#, text)
-                    })
-                    .unwrap_or_default();
-
-                let draft_class = if quoted_note.kind() == 30024 { " damus-embedded-article-draft" } else { "" };
-
-                let card_html = format!(
-                    r#"{image}<div class="damus-embedded-article-title{draft}">{title}</div>{summary}<div class="damus-embedded-article-wordcount">{words}</div>"#,
-                    image = image_html,
-                    draft = draft_class,
-                    title = title_html,
-                    summary = summary_html,
-                    words = word_count_text
-                );
-
-                (String::new(), false, "", " damus-embedded-quote-article", Some(card_html))
-            }
-            // For highlights, use left border styling (no tag needed)
-            9802 => {
-                let full_content = quoted_note.content();
-                let content = abbreviate(full_content, 200);
-                let truncated = content.len() < full_content.len();
-                (content.to_string(), truncated, "", " damus-embedded-quote-highlight", None)
-            }
-            _ => {
-                let full_content = quoted_note.content();
-                let content = abbreviate(full_content, 280);
-                let truncated = content.len() < full_content.len();
-                (content.to_string(), truncated, "", "", None)
-            }
-        };
+                // For highlights, use left border styling (no tag needed)
+                9802 => {
+                    let full_content = quoted_note.content();
+                    let content = abbreviate(full_content, 200);
+                    let truncated = content.len() < full_content.len();
+                    (
+                        content.to_string(),
+                        truncated,
+                        "",
+                        " damus-embedded-quote-highlight",
+                        None,
+                    )
+                }
+                _ => {
+                    let full_content = quoted_note.content();
+                    let content = abbreviate(full_content, 280);
+                    let truncated = content.len() < full_content.len();
+                    (content.to_string(), truncated, "", "", None)
+                }
+            };
         let content_html = html_escape::encode_text(&content_preview).replace("\n", " ");
 
         // Build link to quoted note
@@ -1050,11 +1086,15 @@ fn build_note_content_html(
     if let Some(ref blocks) = blocks {
         for content_ref in extract_quote_refs_from_content(note, blocks) {
             // Deduplicate by event_id or article_addr
-            let is_dup = quote_refs.iter().any(|existing| match (existing, &content_ref) {
-                (QuoteRef::Event { id: a, .. }, QuoteRef::Event { id: b, .. }) => a == b,
-                (QuoteRef::Article { addr: a, .. }, QuoteRef::Article { addr: b, .. }) => a == b,
-                _ => false,
-            });
+            let is_dup = quote_refs
+                .iter()
+                .any(|existing| match (existing, &content_ref) {
+                    (QuoteRef::Event { id: a, .. }, QuoteRef::Event { id: b, .. }) => a == b,
+                    (QuoteRef::Article { addr: a, .. }, QuoteRef::Article { addr: b, .. }) => {
+                        a == b
+                    }
+                    _ => false,
+                });
             if !is_dup {
                 quote_refs.push(content_ref);
             }
@@ -1240,15 +1280,12 @@ fn build_highlight_source_markup(ndb: &Ndb, txn: &Transaction, meta: &HighlightM
     // Case 1: Source is a nostr article (a tag)
     if let Some(addr) = &meta.source_article_addr {
         if let Some((note_key, title)) = lookup_article_by_addr(ndb, txn, addr) {
-            let author_name = ndb
-                .get_note_by_key(txn, note_key)
-                .ok()
-                .and_then(|note| {
-                    get_profile_display_name(
-                        ndb.get_profile_by_pubkey(txn, note.pubkey()).ok().as_ref(),
-                    )
-                    .map(|s| s.to_owned())
-                });
+            let author_name = ndb.get_note_by_key(txn, note_key).ok().and_then(|note| {
+                get_profile_display_name(
+                    ndb.get_profile_by_pubkey(txn, note.pubkey()).ok().as_ref(),
+                )
+                .map(|s| s.to_owned())
+            });
 
             return build_article_source_link(addr, title.as_deref(), author_name.as_deref());
         }

@@ -526,15 +526,102 @@ impl RenderData {
             }
         }
 
-        match fetch_handle.await {
+        // Wait for primary fetch to complete
+        let primary_result = match fetch_handle.await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(err)) => Err(err),
             Err(join_err) => Err(Error::Generic(format!(
                 "relay fetch task failed: {}",
                 join_err
             ))),
+        };
+
+        // After primary note is fetched, collect and fetch quote unknowns
+        if let RenderData::Note(note_rd) = self {
+            debug!("checking for quote unknowns");
+            if let Some(unknowns) = collect_quote_unknowns(&ndb, &note_rd.note_rd) {
+                debug!("fetching {} quote unknowns", unknowns.relay_hints().len());
+                if let Err(err) = fetch_unknowns(&relay_pool, &ndb, unknowns).await {
+                    warn!("failed to fetch quote unknowns: {err}");
+                }
+            } else {
+                debug!("no quote unknowns to fetch");
+            }
+        }
+
+        primary_result
+    }
+}
+
+/// Collect unknown IDs from a note's quote references.
+pub fn collect_quote_unknowns(
+    ndb: &Ndb,
+    note_rd: &NoteRenderData,
+) -> Option<crate::unknowns::UnknownIds> {
+    let txn = Transaction::new(ndb).ok()?;
+    let note = note_rd.lookup(&txn, ndb).ok()?;
+    let quote_refs = crate::html::collect_all_quote_refs(ndb, &txn, &note);
+
+    debug!("found {} quote refs in note", quote_refs.len());
+
+    if quote_refs.is_empty() {
+        return None;
+    }
+
+    let mut unknowns = crate::unknowns::UnknownIds::new();
+    unknowns.collect_from_quote_refs(ndb, &txn, &quote_refs);
+
+    debug!("collected {} unknowns from quote refs", unknowns.ids_len());
+
+    if unknowns.is_empty() {
+        None
+    } else {
+        Some(unknowns)
+    }
+}
+
+/// Fetch unknown IDs (quoted events, profiles) from relays using relay hints.
+pub async fn fetch_unknowns(
+    relay_pool: &Arc<RelayPool>,
+    ndb: &Ndb,
+    unknowns: crate::unknowns::UnknownIds,
+) -> Result<()> {
+    use nostr_sdk::JsonUtil;
+
+    // Collect relay hints before consuming unknowns
+    let relay_hints = unknowns.relay_hints();
+    let relay_targets: Vec<RelayUrl> = if relay_hints.is_empty() {
+        relay_pool.default_relays().to_vec()
+    } else {
+        relay_hints.into_iter().collect()
+    };
+
+    // Build and convert filters in one go (nostrdb::Filter is not Send)
+    let nostr_filters: Vec<nostr::Filter> = {
+        let filters = unknowns.to_filters();
+        if filters.is_empty() {
+            return Ok(());
+        }
+        filters.iter().map(convert_filter).collect()
+    };
+
+    // Now we can await - nostrdb::Filter has been dropped
+    relay_pool.ensure_relays(relay_targets.clone()).await?;
+
+    debug!("fetching {} unknowns from {:?}", nostr_filters.len(), relay_targets);
+
+    // Stream with shorter timeout since these are secondary fetches
+    let mut stream = relay_pool
+        .stream_events(nostr_filters, &relay_targets, Duration::from_millis(1500))
+        .await?;
+
+    while let Some(event) = stream.next().await {
+        if let Err(err) = ndb.process_event(&event.as_json()) {
+            warn!("error processing quoted event: {err}");
         }
     }
+
+    Ok(())
 }
 
 fn collect_relay_hints(event: &Event) -> Vec<RelayUrl> {

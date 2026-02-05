@@ -469,9 +469,18 @@ pub fn render_note_content(
 }
 
 /// Represents a quoted event reference from a q tag (NIP-18) or inline mention.
-enum QuoteRef {
-    Event { id: [u8; 32], bech32: Option<String> },
-    Article { addr: String, bech32: Option<String> },
+#[derive(Clone, PartialEq)]
+pub enum QuoteRef {
+    Event {
+        id: [u8; 32],
+        bech32: Option<String>,
+        relays: Vec<RelayUrl>,
+    },
+    Article {
+        addr: String,
+        bech32: Option<String>,
+        relays: Vec<RelayUrl>,
+    },
 }
 
 /// Extracts quote references from inline nevent/note mentions in content.
@@ -490,17 +499,39 @@ fn extract_quote_refs_from_content(note: &Note, blocks: &Blocks) -> Vec<QuoteRef
         };
 
         match mention {
-            Mention::Event(ev) => {
-                quotes.push(QuoteRef::Event {
-                    id: *ev.id(),
-                    bech32: Some(block.as_str().to_string()),
-                });
+            Mention::Event(_ev) => {
+                let bech32_str = block.as_str();
+                // Parse to get relay hints from nevent
+                if let Ok(Nip19::Event(ev)) = Nip19::from_bech32(bech32_str) {
+                    let relays: Vec<RelayUrl> = ev
+                        .relays
+                        .iter()
+                        .filter_map(|s| RelayUrl::parse(s).ok())
+                        .collect();
+                    quotes.push(QuoteRef::Event {
+                        id: *ev.event_id.as_bytes(),
+                        bech32: Some(bech32_str.to_string()),
+                        relays,
+                    });
+                } else if let Ok(Nip19::EventId(id)) = Nip19::from_bech32(bech32_str) {
+                    // note1 format has no relay hints
+                    quotes.push(QuoteRef::Event {
+                        id: *id.as_bytes(),
+                        bech32: Some(bech32_str.to_string()),
+                        relays: vec![],
+                    });
+                }
             }
-            Mention::Note(note_ref) => {
-                quotes.push(QuoteRef::Event {
-                    id: *note_ref.id(),
-                    bech32: Some(block.as_str().to_string()),
-                });
+            Mention::Note(_note_ref) => {
+                let bech32_str = block.as_str();
+                // note1 format has no relay hints
+                if let Ok(Nip19::EventId(id)) = Nip19::from_bech32(bech32_str) {
+                    quotes.push(QuoteRef::Event {
+                        id: *id.as_bytes(),
+                        bech32: Some(bech32_str.to_string()),
+                        relays: vec![],
+                    });
+                }
             }
             // naddr mentions - articles (30023/30024) and highlights (9802)
             Mention::Addr(_) => {
@@ -517,6 +548,7 @@ fn extract_quote_refs_from_content(note: &Note, blocks: &Blocks) -> Vec<QuoteRef
                         quotes.push(QuoteRef::Article {
                             addr,
                             bech32: Some(bech32_str.to_string()),
+                            relays: coord.relays,
                         });
                     }
                 }
@@ -544,20 +576,44 @@ fn extract_quote_refs_from_tags(note: &Note) -> Vec<QuoteRef> {
         };
         let trimmed = value.trim();
 
+        // Optional relay hint in third element of q tag
+        let tag_relay_hint: Option<RelayUrl> = tag
+            .get_str(2)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| RelayUrl::parse(s).ok());
+
         // Try nevent/note bech32
         if trimmed.starts_with("nevent1") || trimmed.starts_with("note1") {
             if let Ok(nip19) = Nip19::from_bech32(trimmed) {
-                let id = match &nip19 {
-                    Nip19::Event(ev) => Some(*ev.event_id.as_bytes()),
-                    Nip19::EventId(id) => Some(*id.as_bytes()),
-                    _ => None,
-                };
-                if let Some(id) = id {
-                    quotes.push(QuoteRef::Event {
-                        id,
-                        bech32: Some(trimmed.to_owned()),
-                    });
-                    continue;
+                match nip19 {
+                    Nip19::Event(ev) => {
+                        // Combine relays from nevent with q tag relay hint
+                        let mut relays: Vec<RelayUrl> = ev
+                            .relays
+                            .iter()
+                            .filter_map(|s| RelayUrl::parse(s).ok())
+                            .collect();
+                        if let Some(hint) = &tag_relay_hint {
+                            if !relays.contains(hint) {
+                                relays.push(hint.clone());
+                            }
+                        }
+                        quotes.push(QuoteRef::Event {
+                            id: *ev.event_id.as_bytes(),
+                            bech32: Some(trimmed.to_owned()),
+                            relays,
+                        });
+                        continue;
+                    }
+                    Nip19::EventId(id) => {
+                        quotes.push(QuoteRef::Event {
+                            id: *id.as_bytes(),
+                            bech32: Some(trimmed.to_owned()),
+                            relays: tag_relay_hint.clone().into_iter().collect(),
+                        });
+                        continue;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -571,9 +627,17 @@ fn extract_quote_refs_from_tags(note: &Note) -> Vec<QuoteRef> {
                     coord.public_key.to_hex(),
                     coord.identifier
                 );
+                // Combine relays from naddr with q tag relay hint
+                let mut relays = coord.relays;
+                if let Some(hint) = &tag_relay_hint {
+                    if !relays.contains(hint) {
+                        relays.push(hint.clone());
+                    }
+                }
                 quotes.push(QuoteRef::Article {
                     addr,
                     bech32: Some(trimmed.to_owned()),
+                    relays,
                 });
                 continue;
             }
@@ -584,6 +648,7 @@ fn extract_quote_refs_from_tags(note: &Note) -> Vec<QuoteRef> {
             quotes.push(QuoteRef::Article {
                 addr: trimmed.to_owned(),
                 bech32: None,
+                relays: tag_relay_hint.into_iter().collect(),
             });
             continue;
         }
@@ -591,12 +656,33 @@ fn extract_quote_refs_from_tags(note: &Note) -> Vec<QuoteRef> {
         // Try hex event ID
         if let Ok(bytes) = hex::decode(trimmed) {
             if let Ok(id) = bytes.try_into() {
-                quotes.push(QuoteRef::Event { id, bech32: None });
+                quotes.push(QuoteRef::Event {
+                    id,
+                    bech32: None,
+                    relays: tag_relay_hint.into_iter().collect(),
+                });
             }
         }
     }
 
     quotes
+}
+
+/// Collects all quote refs from a note (q tags + inline mentions).
+pub fn collect_all_quote_refs(ndb: &Ndb, txn: &Transaction, note: &Note) -> Vec<QuoteRef> {
+    let mut refs = extract_quote_refs_from_tags(note);
+
+    if let Some(blocks) = note.key().and_then(|k| ndb.get_blocks_by_key(txn, k).ok()) {
+        let inline = extract_quote_refs_from_content(note, &blocks);
+        // Deduplicate - only add inline refs not already in q tags
+        for r in inline {
+            if !refs.contains(&r) {
+                refs.push(r);
+            }
+        }
+    }
+
+    refs
 }
 
 /// Looks up an article by address (kind:pubkey:d-tag) and returns the note key + optional title.
@@ -650,7 +736,7 @@ fn build_quote_link(quote_ref: &QuoteRef) -> String {
     use nostr_sdk::prelude::{Coordinate, EventId, Kind};
 
     match quote_ref {
-        QuoteRef::Event { id, bech32 } => {
+        QuoteRef::Event { id, bech32, .. } => {
             if let Some(b) = bech32 {
                 return format!("/{}", b);
             }
@@ -660,7 +746,7 @@ fn build_quote_link(quote_ref: &QuoteRef) -> String {
                 }
             }
         }
-        QuoteRef::Article { addr, bech32 } => {
+        QuoteRef::Article { addr, bech32, .. } => {
             if let Some(b) = bech32 {
                 return format!("/{}", b);
             }

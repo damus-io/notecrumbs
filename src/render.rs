@@ -19,8 +19,8 @@ use nostr_sdk::nips::nip19::Nip19;
 use nostr_sdk::prelude::{Event, EventId, PublicKey};
 use nostr_sdk::JsonUtil;
 use nostrdb::{
-    Block, BlockType, Blocks, FilterElement, FilterField, Mention, Ndb, Note, NoteKey, ProfileKey,
-    ProfileRecord, Transaction,
+    Block, BlockType, Blocks, FilterElement, FilterField, IngestMetadata, Mention, Ndb, Note,
+    NoteKey, ProfileKey, ProfileRecord, Transaction,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
@@ -362,7 +362,11 @@ pub async fn find_note(
             }
 
             debug!("processing event {:?}", relay_event.event);
-            if let Err(err) = ndb.process_event(&relay_event.event.as_json()) {
+            let relay_url = relay_event.relay_url();
+            let ingest_meta = relay_url
+                .map(|url| IngestMetadata::new().relay(url.as_str()))
+                .unwrap_or_else(IngestMetadata::new);
+            if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
                 error!("error processing event: {err}");
             }
 
@@ -371,7 +375,7 @@ pub async fn find_note(
                 continue;
             }
 
-            let Some(relay_url) = relay_event.relay_url() else {
+            let Some(relay_url) = relay_url else {
                 continue;
             };
 
@@ -440,8 +444,12 @@ async fn fetch_profile_metadata(
     // Process all returned events - nostrdb handles deduplication and keeps newest.
     // Note: we skip ensure_relay_hints here because kind 0 profile metadata doesn't
     // contain relay hints (unlike kind 1 notes which may have 'r' tags).
-    while let Some(event) = stream.next().await {
-        if let Err(err) = ndb.process_event(&event.as_json()) {
+    while let Some(relay_event) = stream.next().await {
+        let ingest_meta = relay_event
+            .relay_url()
+            .map(|url| IngestMetadata::new().relay(url.as_str()))
+            .unwrap_or_else(IngestMetadata::new);
+        if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
             error!("error processing profile metadata event: {err}");
         }
     }
@@ -707,8 +715,12 @@ pub async fn fetch_unknowns(
             .stream_events(filter, &relay_targets, Duration::from_millis(1500))
             .await?;
 
-        while let Some(event) = stream.next().await {
-            if let Err(err) = ndb.process_event(&event.as_json()) {
+        while let Some(relay_event) = stream.next().await {
+            let ingest_meta = relay_event
+                .relay_url()
+                .map(|url| IngestMetadata::new().relay(url.as_str()))
+                .unwrap_or_else(IngestMetadata::new);
+            if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
                 warn!("error processing quoted event: {err}");
             }
         }
@@ -802,7 +814,11 @@ async fn collect_profile_relays(
             .await?;
 
         while let Some(relay_event) = stream.next().await {
-            if let Err(err) = ndb.process_event(&relay_event.event.as_json()) {
+            let ingest_meta = relay_event
+                .relay_url()
+                .map(|url| IngestMetadata::new().relay(url.as_str()))
+                .unwrap_or_else(IngestMetadata::new);
+            if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
                 error!("error processing relay discovery event: {err}");
             }
 
@@ -859,7 +875,11 @@ async fn stream_profile_feed_once(
         if let Err(err) = ensure_relay_hints(&relay_pool, &relay_event.event).await {
             warn!("failed to apply relay hints: {err}");
         }
-        if let Err(err) = ndb.process_event(&relay_event.event.as_json()) {
+        let ingest_meta = relay_event
+            .relay_url()
+            .map(|url| IngestMetadata::new().relay(url.as_str()))
+            .unwrap_or_else(IngestMetadata::new);
+        if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
             error!("error processing profile feed event: {err}");
         } else {
             fetched += 1;

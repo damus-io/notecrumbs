@@ -18,6 +18,12 @@ use std::io::Write;
 use std::str::FromStr;
 use tracing::warn;
 
+struct QuoteProfileInfo {
+    display_name: Option<String>,
+    username: Option<String>,
+    pfp_url: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RelayEntry {
     url: String,
@@ -799,29 +805,40 @@ fn build_embedded_quotes_html(ndb: &Ndb, txn: &Transaction, quote_refs: &[QuoteR
         };
 
         // Get author profile (filter empty strings for proper fallback)
-        let (display_name, username, pfp_url) = ndb
+        let profile_info = ndb
             .get_profile_by_pubkey(txn, quoted_note.pubkey())
             .ok()
             .and_then(|rec| {
                 rec.record().profile().map(|p| {
-                    let name = p
+                    let display_name = p
                         .display_name()
                         .filter(|s| !s.is_empty())
                         .or_else(|| p.name().filter(|s| !s.is_empty()))
                         .map(|n| n.to_owned());
-                    let handle = p
+                    let username = p
                         .name()
                         .filter(|s| !s.is_empty())
                         .map(|n| format!("@{}", n));
-                    let picture = p.picture().filter(|s| !s.is_empty()).map(|s| s.to_owned());
-                    (name, handle, picture)
+                    let pfp_url = p.picture().filter(|s| !s.is_empty()).map(|s| s.to_owned());
+                    QuoteProfileInfo {
+                        display_name,
+                        username,
+                        pfp_url,
+                    }
                 })
             })
-            .unwrap_or((None, None, None));
+            .unwrap_or(QuoteProfileInfo {
+                display_name: None,
+                username: None,
+                pfp_url: None,
+            });
 
-        let display_name = display_name.unwrap_or_else(|| "nostrich".to_string());
+        let display_name = profile_info
+            .display_name
+            .unwrap_or_else(|| "nostrich".to_string());
         let display_name_html = html_escape::encode_text(&display_name);
-        let username_html = username
+        let username_html = profile_info
+            .username
             .map(|u| {
                 format!(
                     r#" <span class="damus-embedded-quote-username">{}</span>"#,
@@ -830,7 +847,8 @@ fn build_embedded_quotes_html(ndb: &Ndb, txn: &Transaction, quote_refs: &[QuoteR
             })
             .unwrap_or_default();
 
-        let pfp_html = pfp_url
+        let pfp_html = profile_info
+            .pfp_url
             .filter(|url| !url.trim().is_empty())
             .map(|url| {
                 let pfp_attr = html_escape::encode_double_quoted_attribute(&url);

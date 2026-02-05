@@ -1512,7 +1512,7 @@ pub fn serve_profile_html(
     app: &Notecrumbs,
     nip: &Nip19,
     profile_rd: Option<&ProfileRenderData>,
-    r: Request<hyper::body::Incoming>,
+    _r: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, Error> {
     let profile_key = match profile_rd {
         None | Some(ProfileRenderData::Missing(_)) => {
@@ -1864,7 +1864,7 @@ pub fn serve_profile_html(
         .body(Full::new(Bytes::from(data)))?)
 }
 
-pub fn serve_homepage(r: Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>, Error> {
+pub fn serve_homepage(_r: Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>, Error> {
     let base_url = get_base_url();
 
     let page_title = "Damus — notecrumbs frontend";
@@ -1980,7 +1980,7 @@ pub fn serve_note_html(
     app: &Notecrumbs,
     nip19: &Nip19,
     note_rd: &NoteAndProfileRenderData,
-    r: Request<hyper::body::Incoming>,
+    _r: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, Error> {
     let mut data = Vec::new();
 

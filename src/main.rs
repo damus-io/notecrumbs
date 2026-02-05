@@ -188,16 +188,14 @@ async fn serve(
         }
     }
 
-    // Always check for quote unknowns when we have a note
+    // Collect and fetch all unknowns from the note (author, mentions, quotes, replies)
     if let RenderData::Note(note_rd) = &render_data {
-        if let Some(unknowns) =
-            render::collect_quote_unknowns(&app.ndb, &note_rd.note_rd)
-        {
-            tracing::debug!("fetching {} quote unknowns", unknowns.relay_hints().len());
+        if let Some(unknowns) = render::collect_note_unknowns(&app.ndb, &note_rd.note_rd) {
+            tracing::debug!("fetching {} unknowns", unknowns.ids_len());
             if let Err(err) =
                 render::fetch_unknowns(&app.relay_pool, &app.ndb, unknowns).await
             {
-                tracing::warn!("failed to fetch quote unknowns: {err}");
+                tracing::warn!("failed to fetch unknowns: {err}");
             }
         }
     }

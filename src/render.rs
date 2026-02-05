@@ -527,51 +527,39 @@ impl RenderData {
         }
 
         // Wait for primary fetch to complete
-        let primary_result = match fetch_handle.await {
+        // Note: unknowns collection happens in main.rs after complete() returns
+        match fetch_handle.await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(err)) => Err(err),
             Err(join_err) => Err(Error::Generic(format!(
                 "relay fetch task failed: {}",
                 join_err
             ))),
-        };
-
-        // After primary note is fetched, collect and fetch quote unknowns
-        if let RenderData::Note(note_rd) = self {
-            debug!("checking for quote unknowns");
-            if let Some(unknowns) = collect_quote_unknowns(&ndb, &note_rd.note_rd) {
-                debug!("fetching {} quote unknowns", unknowns.relay_hints().len());
-                if let Err(err) = fetch_unknowns(&relay_pool, &ndb, unknowns).await {
-                    warn!("failed to fetch quote unknowns: {err}");
-                }
-            } else {
-                debug!("no quote unknowns to fetch");
-            }
         }
-
-        primary_result
     }
 }
 
-/// Collect unknown IDs from a note's quote references.
-pub fn collect_quote_unknowns(
+/// Collect all unknown IDs from a note - author, mentions, quotes, reply chain.
+pub fn collect_note_unknowns(
     ndb: &Ndb,
     note_rd: &NoteRenderData,
 ) -> Option<crate::unknowns::UnknownIds> {
     let txn = Transaction::new(ndb).ok()?;
     let note = note_rd.lookup(&txn, ndb).ok()?;
-    let quote_refs = crate::html::collect_all_quote_refs(ndb, &txn, &note);
-
-    debug!("found {} quote refs in note", quote_refs.len());
-
-    if quote_refs.is_empty() {
-        return None;
-    }
 
     let mut unknowns = crate::unknowns::UnknownIds::new();
-    unknowns.collect_from_quote_refs(ndb, &txn, &quote_refs);
 
-    debug!("collected {} unknowns from quote refs", unknowns.ids_len());
+    // Collect from note content, author, reply chain, mentioned profiles/events
+    unknowns.collect_from_note(ndb, &txn, &note);
+
+    // Also collect from quote refs (q tags and inline nevent/naddr for embedded quotes)
+    let quote_refs = crate::html::collect_all_quote_refs(ndb, &txn, &note);
+    if !quote_refs.is_empty() {
+        debug!("found {} quote refs in note", quote_refs.len());
+        unknowns.collect_from_quote_refs(ndb, &txn, &quote_refs);
+    }
+
+    debug!("collected {} total unknowns from note", unknowns.ids_len());
 
     if unknowns.is_empty() {
         None

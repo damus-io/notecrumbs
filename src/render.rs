@@ -19,8 +19,8 @@ use nostr_sdk::nips::nip19::Nip19;
 use nostr_sdk::prelude::{Event, EventId, PublicKey};
 use nostr_sdk::JsonUtil;
 use nostrdb::{
-    Block, BlockType, Blocks, FilterElement, FilterField, Mention, Ndb, Note, NoteKey, ProfileKey,
-    ProfileRecord, Transaction,
+    Block, BlockType, Blocks, FilterElement, FilterField, IngestMetadata, Mention, Ndb, Note,
+    NoteKey, ProfileKey, ProfileRecord, Transaction,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
@@ -71,6 +71,9 @@ impl NoteRenderData {
 pub struct NoteAndProfileRenderData {
     pub note_rd: NoteRenderData,
     pub profile_rd: Option<ProfileRenderData>,
+    /// Source relay URL(s) where the note was fetched from.
+    /// Used for generating bech32 links with relay hints.
+    pub source_relays: Vec<RelayUrl>,
 }
 
 impl NoteAndProfileRenderData {
@@ -78,6 +81,13 @@ impl NoteAndProfileRenderData {
         Self {
             note_rd,
             profile_rd,
+            source_relays: Vec::new(),
+        }
+    }
+
+    pub fn add_source_relay(&mut self, relay: RelayUrl) {
+        if !self.source_relays.contains(&relay) {
+            self.source_relays.push(relay);
         }
     }
 }
@@ -261,6 +271,9 @@ pub(crate) fn convert_filter(ndb_filter: &nostrdb::Filter) -> nostr::Filter {
             FilterField::Limit(limit) => {
                 filter.limit = Some(limit as usize);
             }
+
+            // Ignore new filter fields we don't handle
+            FilterField::Search(_) | FilterField::Relays(_) | FilterField::Custom(_) => {}
         }
     }
 
@@ -280,8 +293,7 @@ fn build_address_filter(author: &[u8; 32], kind: u64, identifier: &str) -> nostr
     let author_ref: [&[u8; 32]; 1] = [author];
     let mut filter = nostrdb::Filter::new().authors(author_ref).kinds([kind]);
     if !identifier.is_empty() {
-        let ident = identifier.to_string();
-        filter = filter.tags(vec![ident], 'd');
+        filter = filter.tags([identifier], 'd');
     }
     filter.limit(1).build()
 }
@@ -295,10 +307,11 @@ fn query_note_by_address<'a>(
 ) -> std::result::Result<Note<'a>, nostrdb::Error> {
     let mut results = ndb.query(txn, &[build_address_filter(author, kind, identifier)], 1)?;
     if results.is_empty() && !identifier.is_empty() {
+        let coord_tag = coordinate_tag(author, kind, identifier);
         let coord_filter = nostrdb::Filter::new()
             .authors([author])
             .kinds([kind])
-            .tags(vec![coordinate_tag(author, kind, identifier)], 'a')
+            .tags([coord_tag.as_str()], 'a')
             .limit(1)
             .build();
         results = ndb.query(txn, &[coord_filter], 1)?;
@@ -310,12 +323,15 @@ fn query_note_by_address<'a>(
     }
 }
 
+/// Fetches notes from relays and returns the source relay URLs.
+/// The source relays are used to generate bech32 links with relay hints.
+/// Prioritizes default relays in the returned list for better reliability.
 pub async fn find_note(
     relay_pool: Arc<RelayPool>,
     ndb: Ndb,
     filters: Vec<nostr::Filter>,
     nip19: &Nip19,
-) -> Result<()> {
+) -> Result<Vec<RelayUrl>> {
     use nostr_sdk::JsonUtil;
 
     let mut relay_targets = nip19::nip19_relays(nip19);
@@ -327,35 +343,116 @@ pub async fn find_note(
 
     debug!("finding note(s) with filters: {:?}", filters);
 
-    let expected_events = filters.len();
+    let mut all_source_relays = Vec::new();
+    let default_relays = relay_pool.default_relays();
 
-    let mut streamed_events = relay_pool
-        .stream_events(
-            filters,
-            &relay_targets,
-            std::time::Duration::from_millis(2000),
-        )
-        .await?;
+    for filter in filters {
+        let mut streamed_events = relay_pool
+            .stream_events(
+                filter,
+                &relay_targets,
+                std::time::Duration::from_millis(2000),
+            )
+            .await?;
 
-    let mut num_loops = 0;
-    while let Some(event) = streamed_events.next().await {
-        if let Err(err) = ensure_relay_hints(&relay_pool, &event).await {
-            warn!("failed to apply relay hints: {err}");
-        }
+        // Collect all responding relays, then prioritize after stream exhausts.
+        while let Some(relay_event) = streamed_events.next().await {
+            if let Err(err) = ensure_relay_hints(&relay_pool, &relay_event.event).await {
+                warn!("failed to apply relay hints: {err}");
+            }
 
-        debug!("processing event {:?}", event);
-        if let Err(err) = ndb.process_event(&event.as_json()) {
-            error!("error processing event: {err}");
-        }
+            debug!("processing event {:?}", relay_event.event);
+            let relay_url = relay_event.relay_url();
+            let ingest_meta = relay_url
+                .map(|url| IngestMetadata::new().relay(url.as_str()))
+                .unwrap_or_else(IngestMetadata::new);
+            if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
+                error!("error processing event: {err}");
+            }
 
-        num_loops += 1;
+            // Skip profile events - their relays shouldn't be used as note hints
+            if relay_event.event.kind == Kind::Metadata {
+                continue;
+            }
 
-        if num_loops == expected_events {
-            break;
+            let Some(relay_url) = relay_url else {
+                continue;
+            };
+
+            if all_source_relays.contains(relay_url) {
+                continue;
+            }
+
+            all_source_relays.push(relay_url.clone());
         }
     }
 
-    Ok(())
+    // Sort relays: default relays first (more reliable), then others.
+    // Take up to 3 for the final result.
+    const MAX_SOURCE_RELAYS: usize = 3;
+    all_source_relays.sort_by(|a, b| {
+        let a_is_default = default_relays.contains(a);
+        let b_is_default = default_relays.contains(b);
+        b_is_default.cmp(&a_is_default) // true > false, so defaults come first
+    });
+    all_source_relays.truncate(MAX_SOURCE_RELAYS);
+
+    Ok(all_source_relays)
+}
+
+/// Fetch the latest profile metadata (kind 0) from relays and update nostrdb.
+///
+/// Profile metadata is a replaceable event (NIP-01) - nostrdb keeps only the
+/// newest version by `created_at` timestamp. This function queries relays for
+/// the latest kind 0 event to ensure cached profile data stays fresh during
+/// background refreshes.
+async fn fetch_profile_metadata(
+    relay_pool: Arc<RelayPool>,
+    ndb: Ndb,
+    relays: Vec<RelayUrl>,
+    pubkey: [u8; 32],
+) {
+    use nostr_sdk::JsonUtil;
+
+    if relays.is_empty() {
+        return;
+    }
+
+    let filter = {
+        let author_ref = [&pubkey];
+        convert_filter(
+            &nostrdb::Filter::new()
+                .authors(author_ref)
+                .kinds([0])
+                .limit(1)
+                .build(),
+        )
+    };
+
+    let stream = relay_pool
+        .stream_events(filter, &relays, Duration::from_millis(2000))
+        .await;
+
+    let mut stream = match stream {
+        Ok(s) => s,
+        Err(err) => {
+            warn!("failed to stream profile metadata: {err}");
+            return;
+        }
+    };
+
+    // Process all returned events - nostrdb handles deduplication and keeps newest.
+    // Note: we skip ensure_relay_hints here because kind 0 profile metadata doesn't
+    // contain relay hints (unlike kind 1 notes which may have 'r' tags).
+    while let Some(relay_event) = stream.next().await {
+        let ingest_meta = relay_event
+            .relay_url()
+            .map(|url| IngestMetadata::new().relay(url.as_str()))
+            .unwrap_or_else(IngestMetadata::new);
+        if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
+            error!("error processing profile metadata event: {err}");
+        }
+    }
 }
 
 pub async fn fetch_profile_feed(
@@ -365,7 +462,13 @@ pub async fn fetch_profile_feed(
 ) -> Result<()> {
     let relay_targets = collect_profile_relays(relay_pool.clone(), ndb.clone(), pubkey).await?;
 
-    let relay_targets_arc = Arc::new(relay_targets);
+    // Spawn metadata fetch in parallel - best-effort, don't block note refresh
+    tokio::spawn(fetch_profile_metadata(
+        relay_pool.clone(),
+        ndb.clone(),
+        relay_targets.clone(),
+        pubkey,
+    ));
 
     let cutoff = SystemTime::now()
         .checked_sub(Duration::from_secs(
@@ -377,7 +480,7 @@ pub async fn fetch_profile_feed(
     let mut fetched = stream_profile_feed_once(
         relay_pool.clone(),
         ndb.clone(),
-        relay_targets_arc.clone(),
+        &relay_targets,
         pubkey,
         cutoff,
     )
@@ -387,7 +490,7 @@ pub async fn fetch_profile_feed(
         fetched = stream_profile_feed_once(
             relay_pool.clone(),
             ndb.clone(),
-            relay_targets_arc.clone(),
+            &relay_targets,
             pubkey,
             None,
         )
@@ -523,8 +626,17 @@ impl RenderData {
             }
         }
 
+        // Capture source relay URLs from the fetch task
         match fetch_handle.await {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(source_relays)) => {
+                // Store source relays in the render data for bech32 link generation
+                if let RenderData::Note(ref mut note_data) = self {
+                    for relay in source_relays {
+                        note_data.add_source_relay(relay);
+                    }
+                }
+                Ok(())
+            }
             Ok(Err(err)) => Err(err),
             Err(join_err) => Err(Error::Generic(format!(
                 "relay fetch task failed: {}",
@@ -532,6 +644,89 @@ impl RenderData {
             ))),
         }
     }
+}
+
+/// Collect all unknown IDs from a note - author, mentions, quotes, reply chain.
+pub fn collect_note_unknowns(
+    ndb: &Ndb,
+    note_rd: &NoteRenderData,
+) -> Option<crate::unknowns::UnknownIds> {
+    let txn = Transaction::new(ndb).ok()?;
+    let note = note_rd.lookup(&txn, ndb).ok()?;
+
+    let mut unknowns = crate::unknowns::UnknownIds::new();
+
+    // Collect from note content, author, reply chain, mentioned profiles/events
+    unknowns.collect_from_note(ndb, &txn, &note);
+
+    // Also collect from quote refs (q tags and inline nevent/naddr for embedded quotes)
+    let quote_refs = crate::html::collect_all_quote_refs(ndb, &txn, &note);
+    if !quote_refs.is_empty() {
+        debug!("found {} quote refs in note", quote_refs.len());
+        unknowns.collect_from_quote_refs(ndb, &txn, &quote_refs);
+    }
+
+    debug!("collected {} total unknowns from note", unknowns.ids_len());
+
+    if unknowns.is_empty() {
+        None
+    } else {
+        Some(unknowns)
+    }
+}
+
+/// Fetch unknown IDs (quoted events, profiles) from relays using relay hints.
+pub async fn fetch_unknowns(
+    relay_pool: &Arc<RelayPool>,
+    ndb: &Ndb,
+    unknowns: crate::unknowns::UnknownIds,
+) -> Result<()> {
+    use nostr_sdk::JsonUtil;
+
+    // Collect relay hints before consuming unknowns
+    let relay_hints = unknowns.relay_hints();
+    let relay_targets: Vec<RelayUrl> = if relay_hints.is_empty() {
+        relay_pool.default_relays().to_vec()
+    } else {
+        relay_hints.into_iter().collect()
+    };
+
+    // Build and convert filters in one go (nostrdb::Filter is not Send)
+    let nostr_filters: Vec<nostr::Filter> = {
+        let filters = unknowns.to_filters();
+        if filters.is_empty() {
+            return Ok(());
+        }
+        filters.iter().map(convert_filter).collect()
+    };
+
+    // Now we can await - nostrdb::Filter has been dropped
+    relay_pool.ensure_relays(relay_targets.clone()).await?;
+
+    debug!(
+        "fetching {} unknowns from {:?}",
+        nostr_filters.len(),
+        relay_targets
+    );
+
+    // Stream with shorter timeout since these are secondary fetches
+    for filter in nostr_filters {
+        let mut stream = relay_pool
+            .stream_events(filter, &relay_targets, Duration::from_millis(1500))
+            .await?;
+
+        while let Some(relay_event) = stream.next().await {
+            let ingest_meta = relay_event
+                .relay_url()
+                .map(|url| IngestMetadata::new().relay(url.as_str()))
+                .unwrap_or_else(IngestMetadata::new);
+            if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
+                warn!("error processing quoted event: {err}");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn collect_relay_hints(event: &Event) -> Vec<RelayUrl> {
@@ -612,34 +807,38 @@ async fn collect_profile_relays(
             .build(),
     );
 
-    let mut stream = relay_pool
-        .stream_events(
-            vec![relay_filter, contact_filter],
-            &[],
-            Duration::from_millis(2000),
-        )
-        .await?;
-    while let Some(event) = stream.next().await {
-        if let Err(err) = ndb.process_event(&event.as_json()) {
-            error!("error processing relay discovery event: {err}");
-        }
+    // Process each filter separately since stream_events now takes a single filter
+    for filter in [relay_filter, contact_filter] {
+        let mut stream = relay_pool
+            .stream_events(filter, &[], Duration::from_millis(2000))
+            .await?;
 
-        let hints = collect_relay_hints(&event);
-        if hints.is_empty() {
-            continue;
-        }
-
-        let mut fresh = Vec::new();
-        for hint in hints {
-            let key = hint.to_string();
-            if known.insert(key) {
-                targets.push(hint.clone());
-                fresh.push(hint);
+        while let Some(relay_event) = stream.next().await {
+            let ingest_meta = relay_event
+                .relay_url()
+                .map(|url| IngestMetadata::new().relay(url.as_str()))
+                .unwrap_or_else(IngestMetadata::new);
+            if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
+                error!("error processing relay discovery event: {err}");
             }
-        }
 
-        if !fresh.is_empty() {
-            relay_pool.ensure_relays(fresh).await?;
+            let hints = collect_relay_hints(&relay_event.event);
+            if hints.is_empty() {
+                continue;
+            }
+
+            let mut fresh = Vec::new();
+            for hint in hints {
+                let key = hint.to_string();
+                if known.insert(key) {
+                    targets.push(hint.clone());
+                    fresh.push(hint);
+                }
+            }
+
+            if !fresh.is_empty() {
+                relay_pool.ensure_relays(fresh).await?;
+            }
         }
     }
 
@@ -649,7 +848,7 @@ async fn collect_profile_relays(
 async fn stream_profile_feed_once(
     relay_pool: Arc<RelayPool>,
     ndb: Ndb,
-    relays: Arc<Vec<RelayUrl>>,
+    relays: &[RelayUrl],
     pubkey: [u8; 32],
     since: Option<u64>,
 ) -> Result<usize> {
@@ -667,16 +866,20 @@ async fn stream_profile_feed_once(
         convert_filter(&builder.build())
     };
     let mut stream = relay_pool
-        .stream_events(vec![filter], &relays, Duration::from_millis(2000))
+        .stream_events(filter, &relays, Duration::from_millis(2000))
         .await?;
 
     let mut fetched = 0usize;
 
-    while let Some(event) = stream.next().await {
-        if let Err(err) = ensure_relay_hints(&relay_pool, &event).await {
+    while let Some(relay_event) = stream.next().await {
+        if let Err(err) = ensure_relay_hints(&relay_pool, &relay_event.event).await {
             warn!("failed to apply relay hints: {err}");
         }
-        if let Err(err) = ndb.process_event(&event.as_json()) {
+        let ingest_meta = relay_event
+            .relay_url()
+            .map(|url| IngestMetadata::new().relay(url.as_str()))
+            .unwrap_or_else(IngestMetadata::new);
+        if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
             error!("error processing profile feed event: {err}");
         } else {
             fetched += 1;
@@ -696,7 +899,7 @@ pub fn get_render_data(ndb: &Ndb, txn: &Transaction, nip19: &Nip19) -> Result<Re
             let pk = if let Some(pk) = m_note.as_ref().map(|note| note.pubkey()) {
                 Some(*pk)
             } else {
-                nevent.author.map(|a| a.serialize())
+                nevent.author.map(|a| a.to_bytes())
             };
 
             let profile_rd = pk.as_ref().map(|pubkey| {
@@ -739,7 +942,7 @@ pub fn get_render_data(ndb: &Ndb, txn: &Transaction, nip19: &Nip19) -> Result<Re
         }
 
         Nip19::Coordinate(coordinate) => {
-            let author = coordinate.public_key.serialize();
+            let author = coordinate.public_key.to_bytes();
             let kind: u64 = u16::from(coordinate.kind) as u64;
             let identifier = coordinate.identifier.clone();
 
@@ -773,7 +976,7 @@ pub fn get_render_data(ndb: &Ndb, txn: &Transaction, nip19: &Nip19) -> Result<Re
         }
 
         Nip19::Profile(nprofile) => {
-            let pubkey = nprofile.public_key.serialize();
+            let pubkey = nprofile.public_key.to_bytes();
             let profile_rd = if let Ok(profile_key) = ndb.get_profilekey_by_pubkey(txn, &pubkey) {
                 ProfileRenderData::Profile(profile_key)
             } else {
@@ -784,7 +987,7 @@ pub fn get_render_data(ndb: &Ndb, txn: &Transaction, nip19: &Nip19) -> Result<Re
         }
 
         Nip19::Pubkey(public_key) => {
-            let pubkey = public_key.serialize();
+            let pubkey = public_key.to_bytes();
             let profile_rd = if let Ok(profile_key) = ndb.get_profilekey_by_pubkey(txn, &pubkey) {
                 ProfileRenderData::Profile(profile_key)
             } else {
@@ -1165,7 +1368,7 @@ mod tests {
         let coordinate = Coordinate::new(Kind::LongFormTextNote, keys.public_key())
             .identifier(identifier_with_a);
         let event_with_a_only = EventBuilder::long_form_text_note("content with a tag only")
-            .tags([Tag::coordinate(coordinate)])
+            .tags([Tag::coordinate(coordinate, None)])
             .sign_with_keys(&keys)
             .expect("sign long-form event with coordinate tag");
 

@@ -1057,81 +1057,73 @@ fn author_handle_html(profile: Option<&ProfileRecord<'_>>) -> String {
         .unwrap_or_default()
 }
 
-/// Builds reply context HTML for the main note view.
-/// Returns empty string if the note is not a reply.
-fn build_reply_context_html(ndb: &Ndb, txn: &Transaction, note: &Note, base_url: &str) -> String {
+/// Extracts parent note info for thread layout.
+/// Returns None if the note is not a reply.
+struct ParentNoteInfo {
+    link: String,
+    pfp: String,
+    name_html: String,
+    time_html: String,
+    content_html: String,
+}
+
+fn get_parent_note_info(
+    ndb: &Ndb,
+    txn: &Transaction,
+    note: &Note,
+    base_url: &str,
+) -> Option<ParentNoteInfo> {
     use nostrdb::NoteReply;
 
     let reply_info = NoteReply::new(note.tags());
+    let parent_ref = reply_info.reply().or_else(|| reply_info.root())?;
 
-    // Prefer .reply() (direct parent), fall back to .root() for single-level replies
-    let parent_ref = reply_info.reply().or_else(|| reply_info.root());
-    let Some(parent_ref) = parent_ref else {
-        return String::new();
-    };
+    let link = EventId::from_byte_array(*parent_ref.id)
+        .to_bech32()
+        .map(|b| format!("{}/{}", base_url, b))
+        .unwrap_or_else(|_| "#".to_string());
 
     match ndb.get_note_by_id(txn, parent_ref.id) {
         Ok(parent_note) => {
             let parent_profile = ndb.get_profile_by_pubkey(txn, parent_note.pubkey()).ok();
-            let parent_name = get_profile_display_name(parent_profile.as_ref())
-                .unwrap_or("nostrich");
-            let parent_name_html = html_escape::encode_text(parent_name);
+            let name = get_profile_display_name(parent_profile.as_ref()).unwrap_or("nostrich");
 
-            let parent_content = abbreviate(parent_note.content(), 120);
-            let parent_content_html = html_escape::encode_text(parent_content);
-            let ellipsis = if parent_content.len() < parent_note.content().len() {
+            let content = abbreviate(parent_note.content(), 200);
+            let ellipsis = if content.len() < parent_note.content().len() {
                 "..."
             } else {
                 ""
             };
 
-            let parent_pfp = pfp_url_attr(
-                parent_profile
-                    .as_ref()
-                    .and_then(|r| r.record().profile()),
+            let pfp = pfp_url_attr(
+                parent_profile.as_ref().and_then(|r| r.record().profile()),
                 base_url,
             );
 
-            let parent_link = EventId::from_byte_array(*parent_ref.id)
-                .to_bech32()
-                .map(|b| format!("/{}", b))
-                .unwrap_or_else(|_| "#".to_string());
-
-            let relative_time = format_relative_time(parent_note.created_at());
-
-            format!(
-                r#"<div class="damus-reply-context">
-                    <div class="damus-reply-indicator">Replying to <a href="{link}">@{name}</a></div>
-                    <a href="{link}" class="damus-reply-parent">
-                        <div class="damus-reply-parent-header">
-                            <img src="{pfp}" class="damus-reply-parent-avatar" alt="" />
-                            <span class="damus-reply-parent-author">{name}</span>
-                            <span class="damus-reply-parent-time">&middot; {time}</span>
-                        </div>
-                        <div class="damus-reply-parent-content">{content}{ellipsis}</div>
-                    </a>
-                </div>"#,
-                link = parent_link,
-                name = parent_name_html,
-                pfp = parent_pfp,
-                time = html_escape::encode_text(&relative_time),
-                content = parent_content_html,
-                ellipsis = ellipsis,
-            )
+            Some(ParentNoteInfo {
+                link,
+                pfp,
+                name_html: html_escape::encode_text(name).into_owned(),
+                time_html: html_escape::encode_text(&format_relative_time(
+                    parent_note.created_at(),
+                ))
+                .into_owned(),
+                content_html: format!("{}{}", html_escape::encode_text(content), ellipsis),
+            })
         }
         Err(_) => {
-            // Parent note not found - show minimal indicator
-            let parent_id_display = EventId::from_byte_array(*parent_ref.id)
+            let id_display = EventId::from_byte_array(*parent_ref.id)
                 .to_bech32()
                 .map(|b| abbrev_str(&b))
                 .unwrap_or_else(|_| "a note".to_string());
 
-            format!(
-                r#"<div class="damus-reply-context">
-                    <div class="damus-reply-indicator">Replying to {}</div>
-                </div>"#,
-                html_escape::encode_text(&parent_id_display),
-            )
+            Some(ParentNoteInfo {
+                link,
+                pfp: format!("{}/img/no-profile.svg", base_url),
+                name_html: html_escape::encode_text(&id_display).into_owned(),
+                time_html: String::new(),
+                content_html: String::new(),
+            })
         }
     }
 }
@@ -1188,37 +1180,107 @@ fn build_note_content_html(
         }
     }
     let quotes_html = build_embedded_quotes_html(&app.ndb, txn, &quote_refs);
-    let reply_context = build_reply_context_html(&app.ndb, txn, note, base_url);
+    let parent_info = get_parent_note_info(&app.ndb, txn, note, base_url);
 
-    format!(
-        r#"<article class="damus-card damus-note">
-            <header class="damus-note-header">
-               <a href="{base}/{npub}">
-                 <img src="{pfp}" class="damus-note-avatar" alt="{author} profile picture" />
-               </a>
-               <div>
-                 <a href="{base}/{npub}">
-                   <div class="damus-note-author">{author}</div>
-                   {handle}
-                 </a>
-                 <a href="{base}/{note_id}">
-                   <time class="damus-note-time" data-timestamp="{ts}" datetime="{ts}" title="{ts}">{ts}</time>
-                 </a>
-               </div>
-            </header>
-            {reply_context}
-            <div class="damus-note-body">{body}</div>
-            {quotes}
-        </article>"#,
-        base = base_url,
-        pfp = pfp_attr,
-        author = author_display,
-        handle = author_handle,
-        ts = timestamp_attr,
-        reply_context = reply_context,
-        body = note_body,
-        quotes = quotes_html
-    )
+    match parent_info {
+        Some(parent) => {
+            // Thread layout: one avatar column spanning both notes with a line between
+            let time_html = if parent.time_html.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    r#"<span class="damus-thread-parent-time">&middot; {}</span>"#,
+                    parent.time_html
+                )
+            };
+            let content_html = if parent.content_html.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    r#"<div class="damus-thread-parent-text">{}</div>"#,
+                    parent.content_html
+                )
+            };
+
+            format!(
+                r#"<article class="damus-card damus-note damus-thread">
+                    <div class="damus-thread-grid">
+                        <div class="damus-thread-line"></div>
+                        <a href="{parent_link}" class="damus-thread-pfp damus-thread-pfp-parent">
+                            <img src="{parent_pfp}" class="damus-thread-avatar" alt="" />
+                        </a>
+                        <a href="{parent_link}" class="damus-thread-parent-content">
+                            <div class="damus-thread-parent-meta">
+                                <span class="damus-thread-parent-author">{parent_name}</span>
+                                {time}
+                            </div>
+                            {content}
+                        </a>
+                        <a href="{base}/{npub}" class="damus-thread-pfp damus-thread-pfp-reply">
+                            <img src="{pfp}" class="damus-thread-avatar" alt="{author} profile picture" />
+                        </a>
+                        <div class="damus-thread-reply-content">
+                            <div class="damus-thread-reply-meta">
+                                <a href="{base}/{npub}">
+                                    <span class="damus-note-author">{author}</span>
+                                    {handle}
+                                </a>
+                                <a href="{base}/{note_id}">
+                                    <time class="damus-note-time" data-timestamp="{ts}" datetime="{ts}" title="{ts}">{ts}</time>
+                                </a>
+                            </div>
+                            <div class="damus-note-body">{body}</div>
+                            {quotes}
+                        </div>
+                    </div>
+                </article>"#,
+                parent_link = parent.link,
+                parent_pfp = parent.pfp,
+                parent_name = parent.name_html,
+                time = time_html,
+                content = content_html,
+                base = base_url,
+                npub = npub,
+                pfp = pfp_attr,
+                author = author_display,
+                handle = author_handle,
+                note_id = note_id,
+                ts = timestamp_attr,
+                body = note_body,
+                quotes = quotes_html,
+            )
+        }
+        None => {
+            // Standard layout: no thread context
+            format!(
+                r#"<article class="damus-card damus-note">
+                    <header class="damus-note-header">
+                       <a href="{base}/{npub}">
+                         <img src="{pfp}" class="damus-note-avatar" alt="{author} profile picture" />
+                       </a>
+                       <div>
+                         <a href="{base}/{npub}">
+                           <div class="damus-note-author">{author}</div>
+                           {handle}
+                         </a>
+                         <a href="{base}/{note_id}">
+                           <time class="damus-note-time" data-timestamp="{ts}" datetime="{ts}" title="{ts}">{ts}</time>
+                         </a>
+                       </div>
+                    </header>
+                    <div class="damus-note-body">{body}</div>
+                    {quotes}
+                </article>"#,
+                base = base_url,
+                pfp = pfp_attr,
+                author = author_display,
+                handle = author_handle,
+                ts = timestamp_attr,
+                body = note_body,
+                quotes = quotes_html
+            )
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

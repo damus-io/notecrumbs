@@ -578,73 +578,103 @@ a:hover {
   margin-bottom: 0.5rem;
 }
 
-/* Reply context for main note view */
-.damus-reply-context {
+/* Thread layout: CSS grid with avatar + content columns */
+.damus-thread-grid {
+  display: grid;
+  grid-template-columns: 42px 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 0.75rem;
+  row-gap: 0.75rem;
+}
+
+/* Line sits in row 1 of the avatar column, stretches full row height
+   plus the row-gap. margin-top: 42px starts it below the parent avatar.
+   margin-bottom: -0.5rem extends it through the row-gap so it reaches
+   the reply avatar. */
+.damus-thread-line {
+  grid-column: 1;
+  grid-row: 1;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.25);
+  margin: 42px auto -0.75rem;
+  align-self: stretch;
+}
+
+.damus-thread-pfp {
   display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
+  align-items: start;
+  justify-content: center;
 }
 
-.damus-reply-indicator {
-  color: var(--damus-muted);
-  font-size: 0.9rem;
+.damus-thread-pfp-parent {
+  grid-column: 1;
+  grid-row: 1;
 }
 
-.damus-reply-indicator a {
-  color: var(--damus-accent);
-  font-weight: 600;
-  text-decoration: none;
+.damus-thread-pfp-reply {
+  grid-column: 1;
+  grid-row: 2;
 }
 
-.damus-reply-indicator a:hover {
-  text-decoration: underline;
-}
-
-.damus-reply-parent {
-  background: rgba(0, 0, 0, 0.25);
-  border: 1px solid var(--damus-card-border);
-  border-radius: 16px;
-  padding: 0.75rem 1rem;
-  transition: border-color 160ms ease;
-  text-decoration: none;
+.damus-thread-avatar {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  object-fit: cover;
   display: block;
 }
 
-.damus-reply-parent:hover {
-  border-color: rgba(189, 102, 255, 0.3);
+.damus-thread-parent-content {
+  grid-column: 2;
+  grid-row: 1;
   text-decoration: none;
+  padding-bottom: 0.75rem;
+  min-width: 0;
 }
 
-.damus-reply-parent-header {
+.damus-thread-parent-content:hover .damus-thread-parent-text {
+  color: var(--damus-text);
+}
+
+.damus-thread-parent-meta {
   display: flex;
   align-items: center;
   gap: 0.35rem;
   margin-bottom: 0.25rem;
 }
 
-.damus-reply-parent-avatar {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  object-fit: cover;
-  flex-shrink: 0;
-}
-
-.damus-reply-parent-author {
+.damus-thread-parent-author {
   font-weight: 600;
   color: #ffffff;
-  font-size: 0.9rem;
+  font-size: 0.95rem;
 }
 
-.damus-reply-parent-time {
+.damus-thread-parent-time {
   color: var(--damus-muted);
   font-size: 0.85rem;
 }
 
-.damus-reply-parent-content {
+.damus-thread-parent-text {
   color: var(--damus-muted);
   font-size: 0.9rem;
   line-height: 1.5;
+}
+
+.damus-thread-reply-content {
+  grid-column: 2;
+  grid-row: 2;
+  min-width: 0;
+}
+
+.damus-thread-reply-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.damus-thread-reply-meta a {
+  text-decoration: none;
 }
 
 .damus-embedded-quote-content {

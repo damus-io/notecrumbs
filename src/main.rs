@@ -212,39 +212,40 @@ async fn serve(
         }
     }
 
-    // Collect and fetch all unknowns from the note (author, mentions, quotes, replies)
+    // Fetch secondary data (unknowns, stats, reply profiles) in the background.
+    // Render immediately with whatever is in ndb; next load will have the full data.
     if let RenderData::Note(note_rd) = &render_data {
-        if let Some(unknowns) = render::collect_note_unknowns(&app.ndb, &note_rd.note_rd) {
-            tracing::debug!("fetching {} unknowns", unknowns.ids_len());
-            if let Err(err) = render::fetch_unknowns(&app.relay_pool, &app.ndb, unknowns).await {
-                tracing::warn!("failed to fetch unknowns: {err}");
+        let ndb = app.ndb.clone();
+        let relay_pool = app.relay_pool.clone();
+        let note_rd_bg = note_rd.note_rd.clone();
+        let source_relays = note_rd.source_relays.clone();
+        tokio::spawn(async move {
+            // Fetch unknowns (author, mentions, quotes, reply chain)
+            if let Some(unknowns) = render::collect_note_unknowns(&ndb, &note_rd_bg) {
+                tracing::debug!("fetching {} unknowns", unknowns.ids_len());
+                if let Err(err) = render::fetch_unknowns(&relay_pool, &ndb, unknowns).await {
+                    tracing::warn!("failed to fetch unknowns: {err}");
+                }
             }
-        }
 
-        // Fetch note stats (reactions, replies, reposts) for the note
-        if let Err(err) = render::fetch_note_stats(
-            &app.relay_pool,
-            &app.ndb,
-            &note_rd.note_rd,
-            &note_rd.source_relays,
-        )
-        .await
-        {
-            tracing::warn!("failed to fetch note stats: {err}");
-        }
-
-        // Fetch profiles for reply authors (now that replies are ingested)
-        if let Some(reply_unknowns) = render::collect_reply_unknowns(&app.ndb, &note_rd.note_rd) {
-            tracing::debug!(
-                "fetching {} reply author profiles",
-                reply_unknowns.ids_len()
-            );
+            // Fetch note stats (reactions, replies, reposts)
             if let Err(err) =
-                render::fetch_unknowns(&app.relay_pool, &app.ndb, reply_unknowns).await
+                render::fetch_note_stats(&relay_pool, &ndb, &note_rd_bg, &source_relays).await
             {
-                tracing::warn!("failed to fetch reply author profiles: {err}");
+                tracing::warn!("failed to fetch note stats: {err}");
             }
-        }
+
+            // Fetch profiles for reply authors (now that replies are ingested)
+            if let Some(reply_unknowns) = render::collect_reply_unknowns(&ndb, &note_rd_bg) {
+                tracing::debug!(
+                    "fetching {} reply author profiles",
+                    reply_unknowns.ids_len()
+                );
+                if let Err(err) = render::fetch_unknowns(&relay_pool, &ndb, reply_unknowns).await {
+                    tracing::warn!("failed to fetch reply author profiles: {err}");
+                }
+            }
+        });
     }
 
     if let RenderData::Profile(profile_opt) = &render_data {

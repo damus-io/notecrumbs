@@ -33,6 +33,7 @@ pub const PROFILE_FEED_RECENT_LIMIT: usize = 12;
 pub const PROFILE_FEED_LOOKBACK_DAYS: u64 = 30;
 pub const DIRECT_REPLY_LIMIT: i32 = 50;
 
+#[derive(Clone)]
 pub enum NoteRenderData {
     Missing([u8; 32]),
     Address {

@@ -223,8 +223,8 @@ async fn serve(
             }
         }
 
-        // Fetch reactions (kind:7) for the note
-        if let Err(err) = render::fetch_reactions(
+        // Fetch note stats (reactions, replies, reposts) for the note
+        if let Err(err) = render::fetch_note_stats(
             &app.relay_pool,
             &app.ndb,
             &note_rd.note_rd,
@@ -232,7 +232,7 @@ async fn serve(
         )
         .await
         {
-            tracing::warn!("failed to fetch reactions: {err}");
+            tracing::warn!("failed to fetch note stats: {err}");
         }
     }
 

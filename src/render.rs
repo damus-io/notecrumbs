@@ -736,7 +736,8 @@ pub async fn fetch_unknowns(
 }
 
 /// Fetch kind:7 reactions for a note from relays and ingest into ndb.
-pub async fn fetch_reactions(
+/// Fetch note stats (reactions, replies, reposts) from relays and ingest into ndb.
+pub async fn fetch_note_stats(
     relay_pool: &Arc<RelayPool>,
     ndb: &Ndb,
     note_rd: &NoteRenderData,
@@ -744,11 +745,17 @@ pub async fn fetch_reactions(
 ) -> Result<()> {
     use nostr_sdk::JsonUtil;
 
-    // Build the reaction filter (nostrdb::Filter is not Send, so convert before await)
-    let reaction_filter = {
+    // Build filters for reactions (kind:7), replies (kind:1), and reposts (kind:6)
+    // nostrdb::Filter is not Send, so convert before await
+    let filters: Vec<nostr::Filter> = {
         let txn = Transaction::new(ndb)?;
         let note = note_rd.lookup(&txn, ndb)?;
-        convert_filter(&nostrdb::Filter::new().kinds([7]).event(note.id()).build())
+        let id = note.id();
+        vec![
+            convert_filter(&nostrdb::Filter::new().kinds([7]).event(id).build()),
+            convert_filter(&nostrdb::Filter::new().kinds([1]).event(id).build()),
+            convert_filter(&nostrdb::Filter::new().kinds([6]).event(id).build()),
+        ]
     };
 
     let relay_targets: Vec<RelayUrl> = if source_relays.is_empty() {
@@ -759,19 +766,21 @@ pub async fn fetch_reactions(
 
     relay_pool.ensure_relays(relay_targets.clone()).await?;
 
-    debug!("fetching reactions from {:?}", relay_targets);
+    debug!("fetching note stats from {:?}", relay_targets);
 
-    let mut stream = relay_pool
-        .stream_events(reaction_filter, &relay_targets, Duration::from_millis(1500))
-        .await?;
+    for filter in filters {
+        let mut stream = relay_pool
+            .stream_events(filter, &relay_targets, Duration::from_millis(1500))
+            .await?;
 
-    while let Some(relay_event) = stream.next().await {
-        let ingest_meta = relay_event
-            .relay_url()
-            .map(|url| IngestMetadata::new().relay(url.as_str()))
-            .unwrap_or_else(IngestMetadata::new);
-        if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
-            warn!("error processing reaction event: {err}");
+        while let Some(relay_event) = stream.next().await {
+            let ingest_meta = relay_event
+                .relay_url()
+                .map(|url| IngestMetadata::new().relay(url.as_str()))
+                .unwrap_or_else(IngestMetadata::new);
+            if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
+                warn!("error processing event: {err}");
+            }
         }
     }
 

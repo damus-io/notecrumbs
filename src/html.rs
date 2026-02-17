@@ -1129,19 +1129,27 @@ fn get_parent_note_info(
     }
 }
 
-fn build_reactions_html(ndb: &Ndb, txn: &Transaction, note: &Note) -> String {
+fn build_note_stats_html(ndb: &Ndb, txn: &Transaction, note: &Note, is_root: bool) -> String {
     let meta = match ndb.get_note_metadata(txn, note.id()) {
         Ok(m) => m,
         Err(_) => return String::new(),
     };
 
     let mut total_reactions: u32 = 0;
+    let mut reply_count: u32 = 0;
+    let mut repost_count: u16 = 0;
     let mut emojis: Vec<(String, u32)> = Vec::new();
 
     for entry in meta {
         match entry {
             NoteMetadataEntryVariant::Counts(counts) => {
                 total_reactions = counts.reactions();
+                reply_count = if is_root {
+                    counts.thread_replies()
+                } else {
+                    counts.direct_replies() as u32
+                };
+                repost_count = counts.reposts();
             }
             NoteMetadataEntryVariant::Reaction(reaction) => {
                 let mut buf = [0i8; 128];
@@ -1155,33 +1163,48 @@ fn build_reactions_html(ndb: &Ndb, txn: &Transaction, note: &Note) -> String {
         }
     }
 
-    if total_reactions == 0 {
+    if total_reactions == 0 && reply_count == 0 && repost_count == 0 {
         return String::new();
     }
 
-    // Sort emojis by count descending
-    emojis.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut html = String::from(r#"<div class="damus-note-stats">"#);
 
-    let mut html = String::from(r#"<div class="damus-note-reactions">"#);
-
-    // Heart icon + total like count (total_reactions minus custom emoji counts = likes)
-    let custom_total: u32 = emojis.iter().map(|(_, c)| c).sum();
-    let likes = total_reactions.saturating_sub(custom_total);
-
-    if likes > 0 {
+    // Reply count
+    if reply_count > 0 {
         html.push_str(&format!(
-            r#"<span class="damus-reaction"><span class="damus-reaction-emoji">{}</span><span class="damus-reaction-count">{}</span></span>"#,
-            "❤️", likes
+            r#"<span class="damus-stat"><svg class="damus-stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg><span class="damus-stat-count">{}</span></span>"#,
+            reply_count
         ));
     }
 
-    // Top custom emojis (limit to 5)
-    for (emoji, count) in emojis.iter().take(5) {
+    // Repost count
+    if repost_count > 0 {
         html.push_str(&format!(
-            r#"<span class="damus-reaction"><span class="damus-reaction-emoji">{}</span><span class="damus-reaction-count">{}</span></span>"#,
-            html_escape::encode_text(emoji),
-            count
+            r#"<span class="damus-stat"><svg class="damus-stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 1l4 4-4 4"></path><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><path d="M7 23l-4-4 4-4"></path><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg><span class="damus-stat-count">{}</span></span>"#,
+            repost_count
         ));
+    }
+
+    // Reactions
+    if total_reactions > 0 {
+        emojis.sort_by(|a, b| b.1.cmp(&a.1));
+        let custom_total: u32 = emojis.iter().map(|(_, c)| c).sum();
+        let likes = total_reactions.saturating_sub(custom_total);
+
+        if likes > 0 {
+            html.push_str(&format!(
+                r#"<span class="damus-stat"><span class="damus-reaction-emoji">❤️</span><span class="damus-stat-count">{}</span></span>"#,
+                likes
+            ));
+        }
+
+        for (emoji, count) in emojis.iter().take(5) {
+            html.push_str(&format!(
+                r#"<span class="damus-stat"><span class="damus-reaction-emoji">{}</span><span class="damus-stat-count">{}</span></span>"#,
+                html_escape::encode_text(emoji),
+                count
+            ));
+        }
     }
 
     html.push_str("</div>");
@@ -1240,8 +1263,9 @@ fn build_note_content_html(
         }
     }
     let quotes_html = build_embedded_quotes_html(&app.ndb, txn, &quote_refs);
-    let reactions_html = build_reactions_html(&app.ndb, txn, note);
     let parent_info = get_parent_note_info(&app.ndb, txn, note, base_url);
+    let is_root = parent_info.is_none();
+    let stats_html = build_note_stats_html(&app.ndb, txn, note, is_root);
 
     match parent_info {
         Some(parent) => {
@@ -1292,7 +1316,7 @@ fn build_note_content_html(
                             </div>
                             <div class="damus-note-body">{body}</div>
                             {quotes}
-                            {reactions}
+                            {stats}
                         </div>
                     </div>
                 </article>"#,
@@ -1310,7 +1334,7 @@ fn build_note_content_html(
                 ts = timestamp_attr,
                 body = note_body,
                 quotes = quotes_html,
-                reactions = reactions_html,
+                stats = stats_html,
             )
         }
         None => {
@@ -1333,7 +1357,7 @@ fn build_note_content_html(
                     </header>
                     <div class="damus-note-body">{body}</div>
                     {quotes}
-                    {reactions}
+                    {stats}
                 </article>"#,
                 base = base_url,
                 pfp = pfp_attr,
@@ -1342,7 +1366,7 @@ fn build_note_content_html(
                 ts = timestamp_attr,
                 body = note_body,
                 quotes = quotes_html,
-                reactions = reactions_html
+                stats = stats_html
             )
         }
     }
@@ -2096,7 +2120,7 @@ pub fn serve_profile_html(
 
     let page = format!(
         "<!DOCTYPE html>\n\
-<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <title>{page_title}</title>\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n    <meta name=\"description\" content=\"{og_description}\" />\n    <link rel=\"preload\" href=\"/fonts/PoetsenOne-Regular.ttf\" as=\"font\" type=\"font/ttf\" crossorigin />\n    <link rel=\"stylesheet\" href=\"/damus.css?v=5\" type=\"text/css\" />\n    <meta property=\"og:title\" content=\"{og_title}\" />\n    <meta property=\"og:description\" content=\"{og_description}\" />\n    <meta property=\"og:type\" content=\"profile\" />\n    <meta property=\"og:url\" content=\"{canonical_url}\" />\n    <meta property=\"og:image\" content=\"{og_image}\" />\n    <meta property=\"og:image:alt\" content=\"{og_image_alt}\" />\n    <meta property=\"og:image:height\" content=\"600\" />\n    <meta property=\"og:image:width\" content=\"1200\" />\n    <meta property=\"og:image:type\" content=\"image/png\" />\n    <meta property=\"og:site_name\" content=\"Damus\" />\n    <meta name=\"twitter:card\" content=\"summary_large_image\" />\n    <meta name=\"twitter:title\" content=\"{og_title}\" />\n    <meta name=\"twitter:description\" content=\"{og_description}\" />\n    <meta name=\"twitter:image\" content=\"{og_image}\" />\n    <meta name=\"theme-color\" content=\"#bd66ff\" />\n  </head>\n  <body>\n    <div class=\"damus-app\">\n      <header class=\"damus-header\">\n        <a class=\"damus-logo-link\" href=\"https://damus.io\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"damus-logo-image\" src=\"/assets/logo_icon.png?v=2\" alt=\"Damus\" width=\"40\" height=\"40\" /></a>\n        <div class=\"damus-header-actions\">\n          <a class=\"damus-cta\" data-damus-cta data-default-url=\"nostr:{bech32}\" href=\"nostr:{bech32}\">Open in Damus</a>\n        </div>\n      </header>\n      <main class=\"damus-main\">\n{main_content}\n      </main>\n      <footer class=\"damus-footer\">\n        <a href=\"https://github.com/damus-io/notecrumbs\" target=\"_blank\" rel=\"noopener noreferrer\">Rendered by notecrumbs</a>\n      </footer>\n    </div>\n{scripts}\n  </body>\n</html>\n",
+<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <title>{page_title}</title>\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n    <meta name=\"description\" content=\"{og_description}\" />\n    <link rel=\"preload\" href=\"/fonts/PoetsenOne-Regular.ttf\" as=\"font\" type=\"font/ttf\" crossorigin />\n    <link rel=\"stylesheet\" href=\"/damus.css?v=6\" type=\"text/css\" />\n    <meta property=\"og:title\" content=\"{og_title}\" />\n    <meta property=\"og:description\" content=\"{og_description}\" />\n    <meta property=\"og:type\" content=\"profile\" />\n    <meta property=\"og:url\" content=\"{canonical_url}\" />\n    <meta property=\"og:image\" content=\"{og_image}\" />\n    <meta property=\"og:image:alt\" content=\"{og_image_alt}\" />\n    <meta property=\"og:image:height\" content=\"600\" />\n    <meta property=\"og:image:width\" content=\"1200\" />\n    <meta property=\"og:image:type\" content=\"image/png\" />\n    <meta property=\"og:site_name\" content=\"Damus\" />\n    <meta name=\"twitter:card\" content=\"summary_large_image\" />\n    <meta name=\"twitter:title\" content=\"{og_title}\" />\n    <meta name=\"twitter:description\" content=\"{og_description}\" />\n    <meta name=\"twitter:image\" content=\"{og_image}\" />\n    <meta name=\"theme-color\" content=\"#bd66ff\" />\n  </head>\n  <body>\n    <div class=\"damus-app\">\n      <header class=\"damus-header\">\n        <a class=\"damus-logo-link\" href=\"https://damus.io\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"damus-logo-image\" src=\"/assets/logo_icon.png?v=2\" alt=\"Damus\" width=\"40\" height=\"40\" /></a>\n        <div class=\"damus-header-actions\">\n          <a class=\"damus-cta\" data-damus-cta data-default-url=\"nostr:{bech32}\" href=\"nostr:{bech32}\">Open in Damus</a>\n        </div>\n      </header>\n      <main class=\"damus-main\">\n{main_content}\n      </main>\n      <footer class=\"damus-footer\">\n        <a href=\"https://github.com/damus-io/notecrumbs\" target=\"_blank\" rel=\"noopener noreferrer\">Rendered by notecrumbs</a>\n      </footer>\n    </div>\n{scripts}\n  </body>\n</html>\n",
         page_title = page_title_html,
         og_description = og_description_attr,
         og_image = og_image_attr,
@@ -2149,7 +2173,7 @@ pub fn serve_homepage(_r: Request<hyper::body::Incoming>) -> Result<Response<Ful
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="{description}" />
     <link rel="preload" href="/fonts/PoetsenOne-Regular.ttf" as="font" type="font/ttf" crossorigin />
-    <link rel="stylesheet" href="/damus.css?v=5" type="text/css" />
+    <link rel="stylesheet" href="/damus.css?v=6" type="text/css" />
     <meta property="og:title" content="{og_title}" />
     <meta property="og:description" content="{description}" />
     <meta property="og:type" content="website" />
@@ -2424,7 +2448,7 @@ pub fn serve_note_html(
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="{og_description}" />
     <link rel="preload" href="/fonts/PoetsenOne-Regular.ttf" as="font" type="font/ttf" crossorigin />
-    <link rel="stylesheet" href="/damus.css?v=5" type="text/css" />
+    <link rel="stylesheet" href="/damus.css?v=6" type="text/css" />
     <meta property="og:title" content="{og_title}" />
     <meta property="og:description" content="{og_description}" />
     <meta property="og:type" content="{og_type}" />

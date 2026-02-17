@@ -810,3 +810,69 @@ a:hover {
 .damus-stat-count {
   font-weight: 500;
 }
+
+/* Replies section */
+.damus-replies {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 0.75rem;
+}
+
+.damus-reply {
+  display: flex;
+  gap: 0.625rem;
+  padding: 0.75rem 1rem;
+  background: var(--damus-card-bg);
+  border: 1px solid var(--damus-card-border);
+  border-radius: 12px;
+  text-decoration: none;
+  color: var(--damus-text);
+  transition: border-color 160ms ease;
+}
+
+.damus-reply:hover {
+  border-color: rgba(189, 102, 255, 0.3);
+  text-decoration: none;
+}
+
+.damus-reply-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.damus-reply-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.damus-reply-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  margin-bottom: 0.15rem;
+}
+
+.damus-reply-author {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #ffffff;
+}
+
+.damus-reply-time {
+  color: var(--damus-muted);
+  font-size: 0.8rem;
+}
+
+.damus-reply-content {
+  font-size: 0.9rem;
+  color: var(--damus-muted);
+  line-height: 1.5;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}

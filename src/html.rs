@@ -1211,6 +1211,99 @@ fn build_note_stats_html(ndb: &Ndb, txn: &Transaction, note: &Note, is_root: boo
     html
 }
 
+/// Build HTML for direct replies to a note, shown below the note content.
+fn build_replies_html(app: &Notecrumbs, txn: &Transaction, note: &Note, base_url: &str) -> String {
+    let filter = Filter::new().kinds([1]).event(note.id()).build();
+    let mut results = match app.ndb.query(txn, &[filter], 50) {
+        Ok(r) => r,
+        Err(_) => return String::new(),
+    };
+
+    if results.is_empty() {
+        return String::new();
+    }
+
+    // Sort by created_at ascending (oldest first)
+    results.sort_by_key(|r| r.note.created_at());
+
+    // Only show direct replies, not deeper thread replies
+    let note_id = note.id();
+    let mut html = String::from(r#"<section class="damus-replies">"#);
+    let mut count = 0;
+
+    for result in &results {
+        let reply = &result.note;
+
+        // Filter to only direct replies (where the reply target is this note)
+        use nostrdb::NoteReply;
+        let reply_info = NoteReply::new(reply.tags());
+        let is_direct = reply_info
+            .reply()
+            .map(|r| r.id == note_id)
+            .unwrap_or_else(|| {
+                // If no reply tag, check root
+                reply_info.root().map(|r| r.id == note_id).unwrap_or(false)
+            });
+        if !is_direct {
+            continue;
+        }
+
+        let profile_rec = app.ndb.get_profile_by_pubkey(txn, reply.pubkey()).ok();
+        let display_name = get_profile_display_name(profile_rec.as_ref()).unwrap_or("nostrich");
+        let display_name_html = html_escape::encode_text(display_name);
+
+        let pfp_url = profile_rec
+            .as_ref()
+            .and_then(|r| r.record().profile())
+            .and_then(|p| p.picture())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("/img/no-profile.svg");
+        let pfp_attr = html_escape::encode_double_quoted_attribute(pfp_url);
+
+        let time_str = format_relative_time(reply.created_at());
+        let time_html = html_escape::encode_text(&time_str);
+
+        let content = abbreviate(reply.content(), 300);
+        let ellipsis = if content.len() < reply.content().len() {
+            "..."
+        } else {
+            ""
+        };
+        let content_html = format!("{}{}", html_escape::encode_text(content), ellipsis);
+
+        let reply_nevent = Nip19Event::new(EventId::from_byte_array(reply.id().to_owned()));
+        let reply_id = reply_nevent.to_bech32().unwrap_or_default();
+
+        let _ = write!(
+            html,
+            r#"<a href="{base}/{reply_id}" class="damus-reply">
+                <img src="{pfp}" class="damus-reply-avatar" alt="" />
+                <div class="damus-reply-body">
+                    <div class="damus-reply-header">
+                        <span class="damus-reply-author">{author}</span>
+                        <span class="damus-reply-time">&middot; {time}</span>
+                    </div>
+                    <div class="damus-reply-content">{content}</div>
+                </div>
+            </a>"#,
+            base = base_url,
+            reply_id = reply_id,
+            pfp = pfp_attr,
+            author = display_name_html,
+            time = time_html,
+            content = content_html,
+        );
+        count += 1;
+    }
+
+    if count == 0 {
+        return String::new();
+    }
+
+    html.push_str("</section>");
+    html
+}
+
 fn build_note_content_html(
     app: &Notecrumbs,
     note: &Note,
@@ -1266,6 +1359,7 @@ fn build_note_content_html(
     let parent_info = get_parent_note_info(&app.ndb, txn, note, base_url);
     let is_root = parent_info.is_none();
     let stats_html = build_note_stats_html(&app.ndb, txn, note, is_root);
+    let replies_html = build_replies_html(app, txn, note, base_url);
 
     match parent_info {
         Some(parent) => {
@@ -1319,7 +1413,8 @@ fn build_note_content_html(
                             {stats}
                         </div>
                     </div>
-                </article>"#,
+                </article>
+                {replies}"#,
                 parent_link = parent.link,
                 parent_pfp = parent.pfp,
                 parent_name = parent.name_html,
@@ -1335,6 +1430,7 @@ fn build_note_content_html(
                 body = note_body,
                 quotes = quotes_html,
                 stats = stats_html,
+                replies = replies_html,
             )
         }
         None => {
@@ -1358,7 +1454,8 @@ fn build_note_content_html(
                     <div class="damus-note-body">{body}</div>
                     {quotes}
                     {stats}
-                </article>"#,
+                </article>
+                {replies}"#,
                 base = base_url,
                 pfp = pfp_attr,
                 author = author_display,
@@ -1366,7 +1463,8 @@ fn build_note_content_html(
                 ts = timestamp_attr,
                 body = note_body,
                 quotes = quotes_html,
-                stats = stats_html
+                stats = stats_html,
+                replies = replies_html,
             )
         }
     }
@@ -2120,7 +2218,7 @@ pub fn serve_profile_html(
 
     let page = format!(
         "<!DOCTYPE html>\n\
-<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <title>{page_title}</title>\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n    <meta name=\"description\" content=\"{og_description}\" />\n    <link rel=\"preload\" href=\"/fonts/PoetsenOne-Regular.ttf\" as=\"font\" type=\"font/ttf\" crossorigin />\n    <link rel=\"stylesheet\" href=\"/damus.css?v=6\" type=\"text/css\" />\n    <meta property=\"og:title\" content=\"{og_title}\" />\n    <meta property=\"og:description\" content=\"{og_description}\" />\n    <meta property=\"og:type\" content=\"profile\" />\n    <meta property=\"og:url\" content=\"{canonical_url}\" />\n    <meta property=\"og:image\" content=\"{og_image}\" />\n    <meta property=\"og:image:alt\" content=\"{og_image_alt}\" />\n    <meta property=\"og:image:height\" content=\"600\" />\n    <meta property=\"og:image:width\" content=\"1200\" />\n    <meta property=\"og:image:type\" content=\"image/png\" />\n    <meta property=\"og:site_name\" content=\"Damus\" />\n    <meta name=\"twitter:card\" content=\"summary_large_image\" />\n    <meta name=\"twitter:title\" content=\"{og_title}\" />\n    <meta name=\"twitter:description\" content=\"{og_description}\" />\n    <meta name=\"twitter:image\" content=\"{og_image}\" />\n    <meta name=\"theme-color\" content=\"#bd66ff\" />\n  </head>\n  <body>\n    <div class=\"damus-app\">\n      <header class=\"damus-header\">\n        <a class=\"damus-logo-link\" href=\"https://damus.io\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"damus-logo-image\" src=\"/assets/logo_icon.png?v=2\" alt=\"Damus\" width=\"40\" height=\"40\" /></a>\n        <div class=\"damus-header-actions\">\n          <a class=\"damus-cta\" data-damus-cta data-default-url=\"nostr:{bech32}\" href=\"nostr:{bech32}\">Open in Damus</a>\n        </div>\n      </header>\n      <main class=\"damus-main\">\n{main_content}\n      </main>\n      <footer class=\"damus-footer\">\n        <a href=\"https://github.com/damus-io/notecrumbs\" target=\"_blank\" rel=\"noopener noreferrer\">Rendered by notecrumbs</a>\n      </footer>\n    </div>\n{scripts}\n  </body>\n</html>\n",
+<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <title>{page_title}</title>\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n    <meta name=\"description\" content=\"{og_description}\" />\n    <link rel=\"preload\" href=\"/fonts/PoetsenOne-Regular.ttf\" as=\"font\" type=\"font/ttf\" crossorigin />\n    <link rel=\"stylesheet\" href=\"/damus.css?v=7\" type=\"text/css\" />\n    <meta property=\"og:title\" content=\"{og_title}\" />\n    <meta property=\"og:description\" content=\"{og_description}\" />\n    <meta property=\"og:type\" content=\"profile\" />\n    <meta property=\"og:url\" content=\"{canonical_url}\" />\n    <meta property=\"og:image\" content=\"{og_image}\" />\n    <meta property=\"og:image:alt\" content=\"{og_image_alt}\" />\n    <meta property=\"og:image:height\" content=\"600\" />\n    <meta property=\"og:image:width\" content=\"1200\" />\n    <meta property=\"og:image:type\" content=\"image/png\" />\n    <meta property=\"og:site_name\" content=\"Damus\" />\n    <meta name=\"twitter:card\" content=\"summary_large_image\" />\n    <meta name=\"twitter:title\" content=\"{og_title}\" />\n    <meta name=\"twitter:description\" content=\"{og_description}\" />\n    <meta name=\"twitter:image\" content=\"{og_image}\" />\n    <meta name=\"theme-color\" content=\"#bd66ff\" />\n  </head>\n  <body>\n    <div class=\"damus-app\">\n      <header class=\"damus-header\">\n        <a class=\"damus-logo-link\" href=\"https://damus.io\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"damus-logo-image\" src=\"/assets/logo_icon.png?v=2\" alt=\"Damus\" width=\"40\" height=\"40\" /></a>\n        <div class=\"damus-header-actions\">\n          <a class=\"damus-cta\" data-damus-cta data-default-url=\"nostr:{bech32}\" href=\"nostr:{bech32}\">Open in Damus</a>\n        </div>\n      </header>\n      <main class=\"damus-main\">\n{main_content}\n      </main>\n      <footer class=\"damus-footer\">\n        <a href=\"https://github.com/damus-io/notecrumbs\" target=\"_blank\" rel=\"noopener noreferrer\">Rendered by notecrumbs</a>\n      </footer>\n    </div>\n{scripts}\n  </body>\n</html>\n",
         page_title = page_title_html,
         og_description = og_description_attr,
         og_image = og_image_attr,
@@ -2173,7 +2271,7 @@ pub fn serve_homepage(_r: Request<hyper::body::Incoming>) -> Result<Response<Ful
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="{description}" />
     <link rel="preload" href="/fonts/PoetsenOne-Regular.ttf" as="font" type="font/ttf" crossorigin />
-    <link rel="stylesheet" href="/damus.css?v=6" type="text/css" />
+    <link rel="stylesheet" href="/damus.css?v=7" type="text/css" />
     <meta property="og:title" content="{og_title}" />
     <meta property="og:description" content="{description}" />
     <meta property="og:type" content="website" />
@@ -2448,7 +2546,7 @@ pub fn serve_note_html(
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="{og_description}" />
     <link rel="preload" href="/fonts/PoetsenOne-Regular.ttf" as="font" type="font/ttf" crossorigin />
-    <link rel="stylesheet" href="/damus.css?v=6" type="text/css" />
+    <link rel="stylesheet" href="/damus.css?v=7" type="text/css" />
     <meta property="og:title" content="{og_title}" />
     <meta property="og:description" content="{og_description}" />
     <meta property="og:type" content="{og_type}" />

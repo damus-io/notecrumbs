@@ -157,7 +157,9 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
         .limit(MAX_SITEMAP_URLS)
         .build();
 
-    let results = ndb.query(&txn, &[notes_filter], MAX_SITEMAP_URLS as i32).unwrap_or_default();
+    let results = ndb
+        .query(&txn, &[notes_filter], MAX_SITEMAP_URLS as i32)
+        .unwrap_or_default();
     for result in results {
         let Ok(note) = ndb.get_note_by_key(&txn, result.note_key) else {
             continue;
@@ -184,7 +186,9 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
         .limit(MAX_SITEMAP_URLS)
         .build();
 
-    let results = ndb.query(&txn, &[articles_filter], MAX_SITEMAP_URLS as i32).unwrap_or_default();
+    let results = ndb
+        .query(&txn, &[articles_filter], MAX_SITEMAP_URLS as i32)
+        .unwrap_or_default();
     for result in results {
         let Ok(note) = ndb.get_note_by_key(&txn, result.note_key) else {
             continue;
@@ -227,12 +231,11 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
 
     // Query profiles (kind:0 - metadata)
     // No since filter for profiles - they update less frequently
-    let profiles_filter = Filter::new()
-        .kinds([0])
-        .limit(MAX_SITEMAP_URLS)
-        .build();
+    let profiles_filter = Filter::new().kinds([0]).limit(MAX_SITEMAP_URLS).build();
 
-    let results = ndb.query(&txn, &[profiles_filter], MAX_SITEMAP_URLS as i32).unwrap_or_default();
+    let results = ndb
+        .query(&txn, &[profiles_filter], MAX_SITEMAP_URLS as i32)
+        .unwrap_or_default();
     for result in results {
         let Ok(note) = ndb.get_note_by_key(&txn, result.note_key) else {
             continue;
@@ -269,7 +272,10 @@ pub fn generate_sitemap(ndb: &Ndb) -> Result<String, nostrdb::Error> {
     // Record metrics (aggregate stats, not user-tracking)
     let duration = start.elapsed();
     metrics::counter!("sitemap_generations_total", 1);
-    metrics::gauge!("sitemap_generation_duration_seconds", duration.as_secs_f64());
+    metrics::gauge!(
+        "sitemap_generation_duration_seconds",
+        duration.as_secs_f64()
+    );
     metrics::gauge!("sitemap_urls_total", entries.len() as f64);
     metrics::gauge!("sitemap_notes_count", notes_count as f64);
     metrics::gauge!("sitemap_articles_count", articles_count as f64);
@@ -323,8 +329,14 @@ mod tests {
 
     #[test]
     fn test_normalize_base_url() {
-        assert_eq!(normalize_base_url("https://example.com/"), "https://example.com");
-        assert_eq!(normalize_base_url("https://example.com"), "https://example.com");
+        assert_eq!(
+            normalize_base_url("https://example.com/"),
+            "https://example.com"
+        );
+        assert_eq!(
+            normalize_base_url("https://example.com"),
+            "https://example.com"
+        );
     }
 
     #[test]

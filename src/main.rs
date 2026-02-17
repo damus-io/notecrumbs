@@ -149,23 +149,21 @@ async fn serve(
                 .header(header::CACHE_CONTROL, "public, max-age=86400")
                 .body(Full::new(Bytes::from(body)))?);
         }
-        "/sitemap.xml" => {
-            match sitemap::generate_sitemap(&app.ndb) {
-                Ok(xml) => {
-                    return Ok(Response::builder()
-                        .status(StatusCode::OK)
-                        .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
-                        .header(header::CACHE_CONTROL, "public, max-age=3600")
-                        .body(Full::new(Bytes::from(xml)))?);
-                }
-                Err(err) => {
-                    error!("Failed to generate sitemap: {err}");
-                    return Ok(Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(Full::new(Bytes::from("Failed to generate sitemap\n")))?);
-                }
+        "/sitemap.xml" => match sitemap::generate_sitemap(&app.ndb) {
+            Ok(xml) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
+                    .header(header::CACHE_CONTROL, "public, max-age=3600")
+                    .body(Full::new(Bytes::from(xml)))?);
             }
-        }
+            Err(err) => {
+                error!("Failed to generate sitemap: {err}");
+                return Ok(Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Full::new(Bytes::from("Failed to generate sitemap\n")))?);
+            }
+        },
         _ => {}
     }
 

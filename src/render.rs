@@ -954,7 +954,7 @@ async fn stream_profile_feed_once(
         convert_filter(&builder.build())
     };
     let mut stream = relay_pool
-        .stream_events(filter, &relays, Duration::from_millis(2000))
+        .stream_events(filter, relays, Duration::from_millis(2000))
         .await?;
 
     let mut fetched = 0usize;

@@ -175,6 +175,10 @@ impl UnknownIds {
                 .into_iter()
                 .collect();
             self.add_note_if_missing(ndb, txn, root_ref.id, relay_hint);
+            // Also fetch root author profile if root note is already available
+            if let Ok(root_note) = ndb.get_note_by_id(txn, root_ref.id) {
+                self.add_profile_if_missing(ndb, txn, root_note.pubkey());
+            }
         }
 
         // Add reply note if missing (and different from root)
@@ -185,6 +189,10 @@ impl UnknownIds {
                 .into_iter()
                 .collect();
             self.add_note_if_missing(ndb, txn, reply_ref.id, relay_hint);
+            // Also fetch reply parent author profile if note is already available
+            if let Ok(reply_note) = ndb.get_note_by_id(txn, reply_ref.id) {
+                self.add_profile_if_missing(ndb, txn, reply_note.pubkey());
+            }
         }
     }
 

@@ -578,6 +578,75 @@ a:hover {
   margin-bottom: 0.5rem;
 }
 
+/* Reply context for main note view */
+.damus-reply-context {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.damus-reply-indicator {
+  color: var(--damus-muted);
+  font-size: 0.9rem;
+}
+
+.damus-reply-indicator a {
+  color: var(--damus-accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.damus-reply-indicator a:hover {
+  text-decoration: underline;
+}
+
+.damus-reply-parent {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--damus-card-border);
+  border-radius: 16px;
+  padding: 0.75rem 1rem;
+  transition: border-color 160ms ease;
+  text-decoration: none;
+  display: block;
+}
+
+.damus-reply-parent:hover {
+  border-color: rgba(189, 102, 255, 0.3);
+  text-decoration: none;
+}
+
+.damus-reply-parent-header {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.25rem;
+}
+
+.damus-reply-parent-avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.damus-reply-parent-author {
+  font-weight: 600;
+  color: #ffffff;
+  font-size: 0.9rem;
+}
+
+.damus-reply-parent-time {
+  color: var(--damus-muted);
+  font-size: 0.85rem;
+}
+
+.damus-reply-parent-content {
+  color: var(--damus-muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
 .damus-embedded-quote-content {
   color: var(--damus-text);
   font-size: 0.9rem;

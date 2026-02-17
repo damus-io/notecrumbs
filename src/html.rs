@@ -1213,8 +1213,13 @@ fn build_note_stats_html(ndb: &Ndb, txn: &Transaction, note: &Note, is_root: boo
 
 /// Build HTML for direct replies to a note, shown below the note content.
 fn build_replies_html(app: &Notecrumbs, txn: &Transaction, note: &Note, base_url: &str) -> String {
-    let filter = Filter::new().kinds([1]).event(note.id()).build();
-    let mut results = match app.ndb.query(txn, &[filter], 50) {
+    use crate::render::DIRECT_REPLY_LIMIT;
+    let filter = Filter::new()
+        .kinds([1])
+        .event(note.id())
+        .limit(DIRECT_REPLY_LIMIT as u64)
+        .build();
+    let mut results = match app.ndb.query(txn, &[filter], DIRECT_REPLY_LIMIT) {
         Ok(r) => r,
         Err(_) => return String::new(),
     };

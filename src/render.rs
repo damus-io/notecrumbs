@@ -31,6 +31,7 @@ use tracing::{debug, error, warn};
 const PURPLE: Color32 = Color32::from_rgb(0xcc, 0x43, 0xc5);
 pub const PROFILE_FEED_RECENT_LIMIT: usize = 12;
 pub const PROFILE_FEED_LOOKBACK_DAYS: u64 = 30;
+pub const DIRECT_REPLY_LIMIT: i32 = 50;
 
 pub enum NoteRenderData {
     Missing([u8; 32]),
@@ -736,6 +737,35 @@ pub async fn fetch_unknowns(
 }
 
 /// Fetch kind:7 reactions for a note from relays and ingest into ndb.
+/// Collect unknown profiles from reply notes (already ingested into ndb).
+/// Call this after fetch_note_stats so reply authors can be resolved.
+pub fn collect_reply_unknowns(
+    ndb: &Ndb,
+    note_rd: &NoteRenderData,
+) -> Option<crate::unknowns::UnknownIds> {
+    let txn = Transaction::new(ndb).ok()?;
+    let note = note_rd.lookup(&txn, ndb).ok()?;
+
+    let filter = nostrdb::Filter::new()
+        .kinds([1])
+        .event(note.id())
+        .limit(DIRECT_REPLY_LIMIT as u64)
+        .build();
+    let results = ndb.query(&txn, &[filter], DIRECT_REPLY_LIMIT).ok()?;
+
+    let mut unknowns = crate::unknowns::UnknownIds::new();
+
+    for result in &results {
+        unknowns.add_profile_if_missing(ndb, &txn, result.note.pubkey());
+    }
+
+    if unknowns.is_empty() {
+        None
+    } else {
+        Some(unknowns)
+    }
+}
+
 /// Fetch note stats (reactions, replies, reposts) from relays and ingest into ndb.
 pub async fn fetch_note_stats(
     relay_pool: &Arc<RelayPool>,

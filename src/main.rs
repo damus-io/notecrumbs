@@ -234,6 +234,19 @@ async fn serve(
         {
             tracing::warn!("failed to fetch note stats: {err}");
         }
+
+        // Fetch profiles for reply authors (now that replies are ingested)
+        if let Some(reply_unknowns) = render::collect_reply_unknowns(&app.ndb, &note_rd.note_rd) {
+            tracing::debug!(
+                "fetching {} reply author profiles",
+                reply_unknowns.ids_len()
+            );
+            if let Err(err) =
+                render::fetch_unknowns(&app.relay_pool, &app.ndb, reply_unknowns).await
+            {
+                tracing::warn!("failed to fetch reply author profiles: {err}");
+            }
+        }
     }
 
     if let RenderData::Profile(profile_opt) = &render_data {

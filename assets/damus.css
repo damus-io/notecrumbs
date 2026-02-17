@@ -782,3 +782,26 @@ a:hover {
     height: 56px;
   }
 }
+
+/* Reaction counts footer */
+.damus-note-reactions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  flex-wrap: wrap;
+}
+
+.damus-reaction {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--damus-muted);
+  font-size: 0.85rem;
+}
+
+.damus-reaction-count {
+  font-weight: 500;
+}

@@ -245,13 +245,19 @@ pub(crate) fn convert_filter(ndb_filter: &nostrdb::Filter) -> nostr::Filter {
                 let mut elems: BTreeSet<String> = BTreeSet::new();
 
                 for elem in tag_elems {
-                    if let FilterElement::Str(s) = elem {
-                        elems.insert(s.to_string());
-                    } else {
-                        warn!(
-                            "not adding non-string element from filter tag '{}",
-                            single_letter
-                        );
+                    match elem {
+                        FilterElement::Str(s) => {
+                            elems.insert(s.to_string());
+                        }
+                        FilterElement::Id(id) => {
+                            elems.insert(hex::encode(id));
+                        }
+                        _ => {
+                            warn!(
+                                "not adding non-string element from filter tag '{}",
+                                single_letter
+                            );
+                        }
                     }
                 }
 
@@ -723,6 +729,49 @@ pub async fn fetch_unknowns(
             if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
                 warn!("error processing quoted event: {err}");
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Fetch kind:7 reactions for a note from relays and ingest into ndb.
+pub async fn fetch_reactions(
+    relay_pool: &Arc<RelayPool>,
+    ndb: &Ndb,
+    note_rd: &NoteRenderData,
+    source_relays: &[RelayUrl],
+) -> Result<()> {
+    use nostr_sdk::JsonUtil;
+
+    // Build the reaction filter (nostrdb::Filter is not Send, so convert before await)
+    let reaction_filter = {
+        let txn = Transaction::new(ndb)?;
+        let note = note_rd.lookup(&txn, ndb)?;
+        convert_filter(&nostrdb::Filter::new().kinds([7]).event(note.id()).build())
+    };
+
+    let relay_targets: Vec<RelayUrl> = if source_relays.is_empty() {
+        relay_pool.default_relays().to_vec()
+    } else {
+        source_relays.to_vec()
+    };
+
+    relay_pool.ensure_relays(relay_targets.clone()).await?;
+
+    debug!("fetching reactions from {:?}", relay_targets);
+
+    let mut stream = relay_pool
+        .stream_events(reaction_filter, &relay_targets, Duration::from_millis(1500))
+        .await?;
+
+    while let Some(relay_event) = stream.next().await {
+        let ingest_meta = relay_event
+            .relay_url()
+            .map(|url| IngestMetadata::new().relay(url.as_str()))
+            .unwrap_or_else(IngestMetadata::new);
+        if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
+            warn!("error processing reaction event: {err}");
         }
     }
 

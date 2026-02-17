@@ -222,6 +222,18 @@ async fn serve(
                 tracing::warn!("failed to fetch unknowns: {err}");
             }
         }
+
+        // Fetch reactions (kind:7) for the note
+        if let Err(err) = render::fetch_reactions(
+            &app.relay_pool,
+            &app.ndb,
+            &note_rd.note_rd,
+            &note_rd.source_relays,
+        )
+        .await
+        {
+            tracing::warn!("failed to fetch reactions: {err}");
+        }
     }
 
     if let RenderData::Profile(profile_opt) = &render_data {

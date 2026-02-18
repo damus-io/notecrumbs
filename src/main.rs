@@ -690,3 +690,319 @@ fn spawn_relay_pool_metrics_logger(pool: Arc<RelayPool>) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::nips::nip19::{Nip19Coordinate, Nip19Profile};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Helper: create a fresh DashMap wrapped in Arc for testing
+    fn new_state_map() -> Arc<DashMap<[u8; 32], RefreshState>> {
+        Arc::new(DashMap::new())
+    }
+
+    /// Helper: a test key (arbitrary 32 bytes)
+    fn test_key(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+
+    /// Helper: spawn a no-op task that completes immediately, tracking call count
+    fn counting_task(
+        counter: Arc<AtomicUsize>,
+    ) -> impl FnOnce(Arc<DashMap<[u8; 32], RefreshState>>, [u8; 32]) -> tokio::task::JoinHandle<()>
+    {
+        move |state_map, key| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                state_map.insert(key, RefreshState::Completed(Instant::now()));
+            })
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // nip19_debounce_key tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn debounce_key_event_uses_event_id() {
+        let event_id = EventId::all_zeros();
+        let nip19 = Nip19::EventId(event_id);
+        assert_eq!(nip19_debounce_key(&nip19), *event_id.as_bytes());
+    }
+
+    #[test]
+    fn debounce_key_pubkey_uses_pubkey_bytes() {
+        let keys = Keys::generate();
+        let pk = keys.public_key();
+        let nip19 = Nip19::Pubkey(pk);
+        assert_eq!(nip19_debounce_key(&nip19), pk.to_bytes());
+    }
+
+    #[test]
+    fn debounce_key_profile_uses_pubkey_bytes() {
+        let keys = Keys::generate();
+        let pk = keys.public_key();
+        let nip19 = Nip19::Profile(Nip19Profile::new(pk, []));
+        assert_eq!(nip19_debounce_key(&nip19), pk.to_bytes());
+    }
+
+    #[test]
+    fn debounce_key_coordinate_is_deterministic() {
+        use nostr::nips::nip01::Coordinate;
+        let keys = Keys::generate();
+        let coord = Coordinate::new(Kind::LongFormTextNote, keys.public_key())
+            .identifier("test-article");
+        let nip19 = Nip19::Coordinate(Nip19Coordinate::new(coord, []));
+        let key1 = nip19_debounce_key(&nip19);
+        let key2 = nip19_debounce_key(&nip19);
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn debounce_key_different_coordinates_differ() {
+        use nostr::nips::nip01::Coordinate;
+        let keys = Keys::generate();
+        let coord_a = Coordinate::new(Kind::LongFormTextNote, keys.public_key())
+            .identifier("article-a");
+        let coord_b = Coordinate::new(Kind::LongFormTextNote, keys.public_key())
+            .identifier("article-b");
+        let nip19_a = Nip19::Coordinate(Nip19Coordinate::new(coord_a, []));
+        let nip19_b = Nip19::Coordinate(Nip19Coordinate::new(coord_b, []));
+        assert_ne!(nip19_debounce_key(&nip19_a), nip19_debounce_key(&nip19_b));
+    }
+
+    // ---------------------------------------------------------------
+    // try_spawn_debounced tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn debounce_spawns_on_first_call() {
+        let state = new_state_map();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let key = test_key(1);
+
+        let spawned = try_spawn_debounced(&state, key, Duration::from_secs(300), counting_task(counter.clone()));
+
+        assert!(spawned);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        // State should show InProgress (task may have completed already, but the
+        // entry was set before the task ran)
+        assert!(state.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn debounce_skips_while_in_progress() {
+        let state = new_state_map();
+        let key = test_key(2);
+
+        // Insert a fake InProgress entry
+        state.insert(
+            key,
+            RefreshState::InProgress {
+                started: Instant::now(),
+                handle: tokio::spawn(async {}).abort_handle(),
+            },
+        );
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let spawned = try_spawn_debounced(&state, key, Duration::from_secs(300), counting_task(counter.clone()));
+
+        assert!(!spawned);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn debounce_skips_recently_completed() {
+        let state = new_state_map();
+        let key = test_key(3);
+
+        // Insert a Completed entry from just now
+        state.insert(key, RefreshState::Completed(Instant::now()));
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let spawned = try_spawn_debounced(&state, key, Duration::from_secs(300), counting_task(counter.clone()));
+
+        assert!(!spawned);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn debounce_refreshes_after_interval_expires() {
+        let state = new_state_map();
+        let key = test_key(4);
+
+        // Insert a Completed entry from "long ago" (past the interval)
+        let old_time = Instant::now() - Duration::from_secs(600);
+        state.insert(key, RefreshState::Completed(old_time));
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let spawned = try_spawn_debounced(&state, key, Duration::from_secs(300), counting_task(counter.clone()));
+
+        assert!(spawned);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn debounce_aborts_stuck_task_and_retries() {
+        let state = new_state_map();
+        let key = test_key(5);
+
+        // Insert InProgress from >10 minutes ago (stuck)
+        let stuck_time = Instant::now() - Duration::from_secs(11 * 60);
+        let stuck_handle = tokio::spawn(async { std::future::pending::<()>().await });
+        let abort_handle = stuck_handle.abort_handle();
+        state.insert(
+            key,
+            RefreshState::InProgress {
+                started: stuck_time,
+                handle: abort_handle.clone(),
+            },
+        );
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let spawned = try_spawn_debounced(&state, key, Duration::from_secs(300), counting_task(counter.clone()));
+
+        assert!(spawned, "should retry after stuck task");
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        // The old task should have been aborted — yield to let the runtime process it
+        tokio::task::yield_now().await;
+        assert!(stuck_handle.is_finished());
+    }
+
+    #[tokio::test]
+    async fn debounce_does_not_abort_recent_in_progress() {
+        let state = new_state_map();
+        let key = test_key(6);
+
+        // Insert InProgress from just now (not stuck)
+        let handle = tokio::spawn(async { std::future::pending::<()>().await });
+        state.insert(
+            key,
+            RefreshState::InProgress {
+                started: Instant::now(),
+                handle: handle.abort_handle(),
+            },
+        );
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let spawned = try_spawn_debounced(&state, key, Duration::from_secs(300), counting_task(counter.clone()));
+
+        assert!(!spawned);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        // The original task should NOT have been aborted
+        assert!(!handle.is_finished());
+        handle.abort(); // cleanup
+    }
+
+    #[tokio::test]
+    async fn debounce_prunes_stale_entries_over_threshold() {
+        let state = new_state_map();
+        let old_time = Instant::now() - Duration::from_secs(600);
+        let interval = Duration::from_secs(300);
+
+        // Fill the map past the threshold with stale Completed entries
+        for i in 0..(REFRESH_MAP_PRUNE_THRESHOLD + 50) {
+            let mut key = [0u8; 32];
+            key[0] = (i & 0xFF) as u8;
+            key[1] = ((i >> 8) & 0xFF) as u8;
+            state.insert(key, RefreshState::Completed(old_time));
+        }
+
+        assert!(state.len() > REFRESH_MAP_PRUNE_THRESHOLD);
+
+        // The next call should trigger pruning
+        let key = test_key(0xFF);
+        let counter = Arc::new(AtomicUsize::new(0));
+        try_spawn_debounced(&state, key, interval, counting_task(counter.clone()));
+
+        // Stale entries should have been pruned (only the new one + any InProgress remain)
+        assert!(
+            state.len() < REFRESH_MAP_PRUNE_THRESHOLD,
+            "state map should have been pruned, but has {} entries",
+            state.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn debounce_independent_keys_both_spawn() {
+        let state = new_state_map();
+        let key_a = test_key(0xAA);
+        let key_b = test_key(0xBB);
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let spawned_a = try_spawn_debounced(&state, key_a, Duration::from_secs(300), counting_task(counter.clone()));
+        let spawned_b = try_spawn_debounced(&state, key_b, Duration::from_secs(300), counting_task(counter.clone()));
+
+        assert!(spawned_a);
+        assert!(spawned_b);
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    // ---------------------------------------------------------------
+    // Inflight deduplication tests (Notify-based)
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn inflight_dedup_concurrent_waiters_share_one_fetch() {
+        let inflight: Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>> = Arc::new(DashMap::new());
+        let key = test_key(0xCC);
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+
+        // Simulate the "first request" pattern: insert Notify, do work, signal
+        let n = Arc::new(tokio::sync::Notify::new());
+        inflight.insert(key, n.clone());
+
+        // Spawn 10 "waiter" tasks that find the existing Notify and wait
+        let mut waiters = Vec::new();
+        for _ in 0..10 {
+            let inflight = inflight.clone();
+            let fetch_count = fetch_count.clone();
+            let key = key;
+            waiters.push(tokio::spawn(async move {
+                if let Some(notify) = inflight.get(&key).map(|r| r.value().clone()) {
+                    // This is the "waiter" path — no fetch
+                    notify.notified().await;
+                } else {
+                    // This would be the "fetcher" path — shouldn't happen
+                    fetch_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+
+        // Give waiters a moment to subscribe
+        tokio::task::yield_now().await;
+
+        // Simulate the fetch completing
+        fetch_count.fetch_add(1, Ordering::SeqCst);
+        inflight.remove(&key);
+        n.notify_waiters();
+
+        // All waiters should complete
+        for w in waiters {
+            w.await.unwrap();
+        }
+
+        // Only 1 fetch should have happened (the original, not any waiters)
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn inflight_second_request_after_completion_can_fetch() {
+        let inflight: Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>> = Arc::new(DashMap::new());
+        let key = test_key(0xDD);
+
+        // First "request" — insert, do work, remove, notify
+        {
+            let n = Arc::new(tokio::sync::Notify::new());
+            inflight.insert(key, n.clone());
+            // ... fetch happens ...
+            inflight.remove(&key);
+            n.notify_waiters();
+        }
+
+        // Second "request" — should NOT find an inflight entry
+        let found = inflight.get(&key).is_some();
+        assert!(!found, "inflight entry should have been cleaned up");
+    }
+}

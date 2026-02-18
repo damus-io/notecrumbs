@@ -204,160 +204,166 @@ where
     }
 }
 
-impl Notecrumbs {
-    /// Fetch missing render data from relays, deduplicating concurrent requests
-    /// for the same nip19 so only one relay query fires at a time.
-    async fn fetch_if_missing(&self, render_data: &mut RenderData, nip19: &Nip19) {
-        let key = nip19_debounce_key(nip19);
+/// Fetch missing render data from relays, deduplicating concurrent requests
+/// for the same nip19 so only one relay query fires at a time.
+async fn fetch_if_missing(
+    ndb: &Ndb,
+    relay_pool: &Arc<RelayPool>,
+    inflight: &Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>>,
+    render_data: &mut RenderData,
+    nip19: &Nip19,
+) {
+    let key = nip19_debounce_key(nip19);
 
-        // Check if there's already an inflight fetch for this resource
-        let existing_notify = self.inflight.get(&key).map(|r| r.value().clone());
+    // Check if there's already an inflight fetch for this resource
+    let existing_notify = inflight.get(&key).map(|r| r.value().clone());
 
-        if let Some(notify) = existing_notify {
-            // Another request is already fetching — wait for it, then re-check ndb
-            notify.notified().await;
-            let txn = match Transaction::new(&self.ndb) {
-                Ok(txn) => txn,
-                Err(err) => {
-                    error!("failed to open transaction after inflight wait: {err}");
+    if let Some(notify) = existing_notify {
+        // Another request is already fetching — wait for it, then re-check ndb
+        notify.notified().await;
+        let txn = match Transaction::new(ndb) {
+            Ok(txn) => txn,
+            Err(err) => {
+                error!("failed to open transaction after inflight wait: {err}");
+                return;
+            }
+        };
+        if let Ok(new_rd) = render::get_render_data(ndb, &txn, nip19) {
+            *render_data = new_rd;
+        }
+    } else {
+        // We're the first — register inflight and do the fetch
+        let n = Arc::new(tokio::sync::Notify::new());
+        inflight.insert(key, n.clone());
+
+        if let Err(err) = render_data
+            .complete(ndb.clone(), relay_pool.clone(), nip19.clone())
+            .await
+        {
+            error!("Error fetching completion data: {err}");
+        }
+
+        // Signal waiters and remove inflight entry
+        inflight.remove(&key);
+        n.notify_waiters();
+    }
+}
+
+/// Spawn a debounced background task to fetch secondary note data
+/// (unknowns, stats, reply profiles). Skips if a fetch already ran
+/// recently for this nip19 resource.
+fn spawn_note_secondary_fetch(
+    ndb: &Ndb,
+    relay_pool: &Arc<RelayPool>,
+    note_refresh_state: &Arc<DashMap<[u8; 32], RefreshState>>,
+    nip19: &Nip19,
+    note_rd: &render::NoteAndProfileRenderData,
+) {
+    let ndb = ndb.clone();
+    let relay_pool = relay_pool.clone();
+    let note_rd_bg = note_rd.note_rd.clone();
+    let source_relays = note_rd.source_relays.clone();
+
+    try_spawn_debounced(
+        note_refresh_state,
+        nip19_debounce_key(nip19),
+        NOTE_REFRESH_INTERVAL,
+        |state_map, key| {
+            tokio::spawn(async move {
+                if let Err(err) =
+                    fetch_note_secondary_data(&relay_pool, &ndb, &note_rd_bg, &source_relays).await
+                {
+                    tracing::warn!("background note secondary fetch failed: {err}");
+                    state_map.remove(&key);
                     return;
                 }
-            };
-            if let Ok(new_rd) = render::get_render_data(&self.ndb, &txn, nip19) {
-                *render_data = new_rd;
+                state_map.insert(key, RefreshState::Completed(Instant::now()));
+            })
+        },
+    );
+}
+
+/// Ensure profile feed data is available, fetching from relays if needed.
+/// Uses debounced background refresh when cached data exists.
+async fn ensure_profile_feed(
+    ndb: &Ndb,
+    relay_pool: &Arc<RelayPool>,
+    inflight: &Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>>,
+    profile_refresh_state: &Arc<DashMap<[u8; 32], RefreshState>>,
+    profile_opt: &Option<ProfileRenderData>,
+) -> Result<(), Error> {
+    let maybe_pubkey = {
+        let txn = Transaction::new(ndb)?;
+        match profile_opt {
+            Some(ProfileRenderData::Profile(profile_key)) => {
+                if let Ok(profile_rec) = ndb.get_profile_by_key(&txn, *profile_key) {
+                    let note_key = NoteKey::new(profile_rec.record().note_key());
+                    ndb.get_note_by_key(&txn, note_key)
+                        .ok()
+                        .map(|note| *note.pubkey())
+                } else {
+                    None
+                }
             }
+            Some(ProfileRenderData::Missing(pk)) => Some(*pk),
+            None => None,
+        }
+    };
+
+    let Some(pubkey) = maybe_pubkey else {
+        return Ok(());
+    };
+
+    let has_cached_notes = {
+        let txn = Transaction::new(ndb)?;
+        let notes_filter = Filter::new().authors([&pubkey]).kinds([1]).limit(1).build();
+        ndb.query(&txn, &[notes_filter], 1)
+            .map(|results| !results.is_empty())
+            .unwrap_or(false)
+    };
+
+    let pool = relay_pool.clone();
+    let ndb = ndb.clone();
+
+    if has_cached_notes {
+        try_spawn_debounced(
+            profile_refresh_state,
+            pubkey,
+            PROFILE_REFRESH_INTERVAL,
+            |state_map, key| {
+                tokio::spawn(async move {
+                    match render::fetch_profile_feed(pool, ndb, key).await {
+                        Ok(()) => {
+                            state_map.insert(key, RefreshState::Completed(Instant::now()));
+                        }
+                        Err(err) => {
+                            error!("Background profile feed refresh failed: {err}");
+                            state_map.remove(&key);
+                        }
+                    }
+                })
+            },
+        );
+    } else {
+        // No cached data: must wait for relay fetch before rendering.
+        // Use inflight dedup so concurrent requests for the same profile
+        // don't each fire their own relay queries.
+        let existing_notify = inflight.get(&pubkey).map(|r| r.value().clone());
+
+        if let Some(notify) = existing_notify {
+            notify.notified().await;
         } else {
-            // We're the first — register inflight and do the fetch
             let n = Arc::new(tokio::sync::Notify::new());
-            self.inflight.insert(key, n.clone());
-
-            if let Err(err) = render_data
-                .complete(self.ndb.clone(), self.relay_pool.clone(), nip19.clone())
-                .await
-            {
-                error!("Error fetching completion data: {err}");
+            inflight.insert(pubkey, n.clone());
+            if let Err(err) = render::fetch_profile_feed(pool, ndb, pubkey).await {
+                error!("Error fetching profile feed: {err}");
             }
-
-            // Signal waiters and remove inflight entry
-            self.inflight.remove(&key);
+            inflight.remove(&pubkey);
             n.notify_waiters();
         }
     }
 
-    /// Spawn a debounced background task to fetch secondary note data
-    /// (unknowns, stats, reply profiles). Skips if a fetch already ran
-    /// recently for this nip19 resource.
-    fn spawn_note_secondary_fetch(
-        &self,
-        nip19: &Nip19,
-        note_rd: &render::NoteAndProfileRenderData,
-    ) {
-        let ndb = self.ndb.clone();
-        let relay_pool = self.relay_pool.clone();
-        let note_rd_bg = note_rd.note_rd.clone();
-        let source_relays = note_rd.source_relays.clone();
-
-        try_spawn_debounced(
-            &self.note_refresh_state,
-            nip19_debounce_key(nip19),
-            NOTE_REFRESH_INTERVAL,
-            |state_map, key| {
-                tokio::spawn(async move {
-                    if let Err(err) =
-                        fetch_note_secondary_data(&relay_pool, &ndb, &note_rd_bg, &source_relays)
-                            .await
-                    {
-                        tracing::warn!("background note secondary fetch failed: {err}");
-                        state_map.remove(&key);
-                        return;
-                    }
-                    state_map.insert(key, RefreshState::Completed(Instant::now()));
-                })
-            },
-        );
-    }
-
-    /// Ensure profile feed data is available, fetching from relays if needed.
-    /// Uses debounced background refresh when cached data exists.
-    async fn ensure_profile_feed(
-        &self,
-        profile_opt: &Option<ProfileRenderData>,
-    ) -> Result<(), Error> {
-        let maybe_pubkey = {
-            let txn = Transaction::new(&self.ndb)?;
-            match profile_opt {
-                Some(ProfileRenderData::Profile(profile_key)) => {
-                    if let Ok(profile_rec) = self.ndb.get_profile_by_key(&txn, *profile_key) {
-                        let note_key = NoteKey::new(profile_rec.record().note_key());
-                        self.ndb
-                            .get_note_by_key(&txn, note_key)
-                            .ok()
-                            .map(|note| *note.pubkey())
-                    } else {
-                        None
-                    }
-                }
-                Some(ProfileRenderData::Missing(pk)) => Some(*pk),
-                None => None,
-            }
-        };
-
-        let Some(pubkey) = maybe_pubkey else {
-            return Ok(());
-        };
-
-        let has_cached_notes = {
-            let txn = Transaction::new(&self.ndb)?;
-            let notes_filter = Filter::new().authors([&pubkey]).kinds([1]).limit(1).build();
-            self.ndb
-                .query(&txn, &[notes_filter], 1)
-                .map(|results| !results.is_empty())
-                .unwrap_or(false)
-        };
-
-        let pool = self.relay_pool.clone();
-        let ndb = self.ndb.clone();
-
-        if has_cached_notes {
-            try_spawn_debounced(
-                &self.profile_refresh_state,
-                pubkey,
-                PROFILE_REFRESH_INTERVAL,
-                |state_map, key| {
-                    tokio::spawn(async move {
-                        match render::fetch_profile_feed(pool, ndb, key).await {
-                            Ok(()) => {
-                                state_map.insert(key, RefreshState::Completed(Instant::now()));
-                            }
-                            Err(err) => {
-                                error!("Background profile feed refresh failed: {err}");
-                                state_map.remove(&key);
-                            }
-                        }
-                    })
-                },
-            );
-        } else {
-            // No cached data: must wait for relay fetch before rendering.
-            // Use inflight dedup so concurrent requests for the same profile
-            // don't each fire their own relay queries.
-            let existing_notify = self.inflight.get(&pubkey).map(|r| r.value().clone());
-
-            if let Some(notify) = existing_notify {
-                notify.notified().await;
-            } else {
-                let n = Arc::new(tokio::sync::Notify::new());
-                self.inflight.insert(pubkey, n.clone());
-                if let Err(err) = render::fetch_profile_feed(pool, ndb, pubkey).await {
-                    error!("Error fetching profile feed: {err}");
-                }
-                self.inflight.remove(&pubkey);
-                n.notify_waiters();
-            }
-        }
-
-        Ok(())
-    }
+    Ok(())
 }
 
 /// Background task: fetch all secondary data for a note (unknowns, stats, reply profiles).
@@ -496,17 +502,37 @@ async fn serve(
 
     // Fetch missing note/profile data from relays (deduplicated across concurrent requests)
     if !render_data.is_complete() {
-        app.fetch_if_missing(&mut render_data, &nip19).await;
+        fetch_if_missing(
+            &app.ndb,
+            &app.relay_pool,
+            &app.inflight,
+            &mut render_data,
+            &nip19,
+        )
+        .await;
     }
 
     // Spawn debounced background fetch for secondary note data (unknowns, stats, replies)
     if let RenderData::Note(note_rd) = &render_data {
-        app.spawn_note_secondary_fetch(&nip19, note_rd);
+        spawn_note_secondary_fetch(
+            &app.ndb,
+            &app.relay_pool,
+            &app.note_refresh_state,
+            &nip19,
+            note_rd,
+        );
     }
 
     // Ensure profile feed data is available (debounced background refresh or blocking fetch)
     if let RenderData::Profile(profile_opt) = &render_data {
-        app.ensure_profile_feed(profile_opt).await?;
+        ensure_profile_feed(
+            &app.ndb,
+            &app.relay_pool,
+            &app.inflight,
+            &app.profile_refresh_state,
+            profile_opt,
+        )
+        .await?;
     }
 
     if is_png {

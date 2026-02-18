@@ -82,9 +82,10 @@ pub struct Notecrumbs {
     /// Tracks refresh state per note id - debounces background fetches (unknowns, stats, replies)
     note_refresh_state: Arc<DashMap<[u8; 32], RefreshState>>,
 
-    /// Inflight note fetches - deduplicates concurrent complete() calls for the same note.
-    /// Waiters subscribe to the Notify; the fetcher notifies on completion.
-    note_inflight: Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>>,
+    /// Inflight fetches - deduplicates concurrent relay queries for the same resource.
+    /// Keyed by nip19 debounce key. Waiters subscribe to the Notify; the fetcher
+    /// notifies on completion.
+    inflight: Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>>,
 }
 
 #[inline]
@@ -108,13 +109,31 @@ fn is_utf8_char_boundary(c: u8) -> bool {
     (c as i8) >= -0x40
 }
 
-/// Extract a note event ID from a nip19 reference, if it refers to a note.
-fn nip19_note_id(nip19: &Nip19) -> Option<[u8; 32]> {
+/// Derive a 32-byte debounce key from any nip19 reference.
+/// Used to deduplicate relay fetches across concurrent and repeated requests.
+fn nip19_debounce_key(nip19: &Nip19) -> [u8; 32] {
+    use std::hash::{Hash, Hasher};
     match nip19 {
-        Nip19::Event(ev) => Some(*ev.event_id.as_bytes()),
-        Nip19::EventId(id) => Some(*id.as_bytes()),
-        // Addresses (naddr) don't have a stable event ID
-        _ => None,
+        Nip19::Event(ev) => *ev.event_id.as_bytes(),
+        Nip19::EventId(id) => *id.as_bytes(),
+        Nip19::Pubkey(pk) => pk.to_bytes(),
+        Nip19::Profile(p) => p.public_key.to_bytes(),
+        Nip19::Coordinate(coord) => {
+            // Hash the address components into a stable 32-byte key
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            coord.coordinate.public_key.to_bytes().hash(&mut hasher);
+            coord.coordinate.kind.as_u16().hash(&mut hasher);
+            coord.coordinate.identifier.hash(&mut hasher);
+            let h = hasher.finish().to_le_bytes();
+            let mut key = [0u8; 32];
+            // Repeat the 8-byte hash to fill 32 bytes
+            key[..8].copy_from_slice(&h);
+            key[8..16].copy_from_slice(&h);
+            key[16..24].copy_from_slice(&h);
+            key[24..32].copy_from_slice(&h);
+            key
+        }
+        Nip19::Secret(_) => [0u8; 32], // shouldn't happen, rejected earlier
     }
 }
 
@@ -187,13 +206,12 @@ where
 
 impl Notecrumbs {
     /// Fetch missing render data from relays, deduplicating concurrent requests
-    /// for the same note so only one relay query fires at a time.
-    async fn fetch_note_if_missing(&self, render_data: &mut RenderData, nip19: &Nip19) {
-        let note_id = nip19_note_id(nip19);
+    /// for the same nip19 so only one relay query fires at a time.
+    async fn fetch_if_missing(&self, render_data: &mut RenderData, nip19: &Nip19) {
+        let key = nip19_debounce_key(nip19);
 
-        // Check if there's already an inflight fetch for this note
-        let existing_notify =
-            note_id.and_then(|id| self.note_inflight.get(&id).map(|r| r.value().clone()));
+        // Check if there's already an inflight fetch for this resource
+        let existing_notify = self.inflight.get(&key).map(|r| r.value().clone());
 
         if let Some(notify) = existing_notify {
             // Another request is already fetching — wait for it, then re-check ndb
@@ -210,11 +228,8 @@ impl Notecrumbs {
             }
         } else {
             // We're the first — register inflight and do the fetch
-            let notify = note_id.map(|id| {
-                let n = Arc::new(tokio::sync::Notify::new());
-                self.note_inflight.insert(id, n.clone());
-                (id, n)
-            });
+            let n = Arc::new(tokio::sync::Notify::new());
+            self.inflight.insert(key, n.clone());
 
             if let Err(err) = render_data
                 .complete(self.ndb.clone(), self.relay_pool.clone(), nip19.clone())
@@ -224,25 +239,19 @@ impl Notecrumbs {
             }
 
             // Signal waiters and remove inflight entry
-            if let Some((id, n)) = notify {
-                self.note_inflight.remove(&id);
-                n.notify_waiters();
-            }
+            self.inflight.remove(&key);
+            n.notify_waiters();
         }
     }
 
     /// Spawn a debounced background task to fetch secondary note data
     /// (unknowns, stats, reply profiles). Skips if a fetch already ran
-    /// recently for this note ID.
+    /// recently for this nip19 resource.
     fn spawn_note_secondary_fetch(
         &self,
         nip19: &Nip19,
         note_rd: &render::NoteAndProfileRenderData,
     ) {
-        let Some(note_id) = nip19_note_id(nip19) else {
-            return;
-        };
-
         let ndb = self.ndb.clone();
         let relay_pool = self.relay_pool.clone();
         let note_rd_bg = note_rd.note_rd.clone();
@@ -250,7 +259,7 @@ impl Notecrumbs {
 
         try_spawn_debounced(
             &self.note_refresh_state,
-            note_id,
+            nip19_debounce_key(nip19),
             NOTE_REFRESH_INTERVAL,
             |state_map, key| {
                 tokio::spawn(async move {
@@ -329,9 +338,21 @@ impl Notecrumbs {
                 },
             );
         } else {
-            // No cached data: must wait for relay fetch before rendering
-            if let Err(err) = render::fetch_profile_feed(pool, ndb, pubkey).await {
-                error!("Error fetching profile feed: {err}");
+            // No cached data: must wait for relay fetch before rendering.
+            // Use inflight dedup so concurrent requests for the same profile
+            // don't each fire their own relay queries.
+            let existing_notify = self.inflight.get(&pubkey).map(|r| r.value().clone());
+
+            if let Some(notify) = existing_notify {
+                notify.notified().await;
+            } else {
+                let n = Arc::new(tokio::sync::Notify::new());
+                self.inflight.insert(pubkey, n.clone());
+                if let Err(err) = render::fetch_profile_feed(pool, ndb, pubkey).await {
+                    error!("Error fetching profile feed: {err}");
+                }
+                self.inflight.remove(&pubkey);
+                n.notify_waiters();
             }
         }
 
@@ -475,7 +496,7 @@ async fn serve(
 
     // Fetch missing note/profile data from relays (deduplicated across concurrent requests)
     if !render_data.is_complete() {
-        app.fetch_note_if_missing(&mut render_data, &nip19).await;
+        app.fetch_if_missing(&mut render_data, &nip19).await;
     }
 
     // Spawn debounced background fetch for secondary note data (unknowns, stats, replies)
@@ -598,7 +619,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         prometheus_handle,
         profile_refresh_state: Arc::new(DashMap::new()),
         note_refresh_state: Arc::new(DashMap::new()),
-        note_inflight: Arc::new(DashMap::new()),
+        inflight: Arc::new(DashMap::new()),
     };
 
     // We start a loop to continuously accept incoming connections

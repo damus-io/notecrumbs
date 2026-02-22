@@ -1159,7 +1159,9 @@ fn build_note_stats_html(ndb: &Ndb, txn: &Transaction, note: &Note, is_root: boo
                     emojis.push((s.to_string(), count));
                 }
             }
-            NoteMetadataEntryVariant::Unknown(_) => {}
+            NoteMetadataEntryVariant::Unknown(_)
+            | NoteMetadataEntryVariant::Zap(_)
+            | NoteMetadataEntryVariant::ZapUnverified(_) => {}
         }
     }
 

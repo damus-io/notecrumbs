@@ -13,8 +13,8 @@ hyper-util = { version = "0.1.1", features = ["full"] }
 http-body-util = "0.1"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
-nostrdb = "0.9.0"
-#nostrdb = { path = "/home/jb55/src/rust/nostrdb-rs" }
+#nostrdb = "0.9.0"
+nostrdb = { path = "/home/jb55/dev/github/damus-io/nostrdb-rs" }
 #nostrdb = "0.1.6"
 #nostr-sdk = { git = "https://github.com/damus-io/nostr-sdk.git", rev = "fc0dc7b38f5060f171228b976b9700c0135245d3" }
 #nostr-sdk = "0.37.0"

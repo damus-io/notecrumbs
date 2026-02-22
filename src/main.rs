@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use dashmap::DashMap;
+use tokio::sync::watch;
 use tokio::task::AbortHandle;
 
 use http_body_util::Full;
@@ -83,9 +84,10 @@ pub struct Notecrumbs {
     note_refresh_state: Arc<DashMap<[u8; 32], RefreshState>>,
 
     /// Inflight fetches - deduplicates concurrent relay queries for the same resource.
-    /// Keyed by nip19 debounce key. Waiters subscribe to the Notify; the fetcher
-    /// notifies on completion.
-    inflight: Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>>,
+    /// Keyed by nip19 debounce key. Waiters clone the watch::Receiver and wait for
+    /// the fetcher to signal completion. Uses watch instead of Notify to avoid
+    /// missed-notification races.
+    inflight: Arc<DashMap<[u8; 32], watch::Receiver<bool>>>,
 }
 
 #[inline]
@@ -209,10 +211,10 @@ where
 /// Returns `true` if this call was the "fetcher" (ran the work),
 /// `false` if it was a "waiter" (another call was already in progress).
 ///
-/// The fetcher inserts a Notify into the inflight map, runs the work closure,
-/// then removes the entry and wakes all waiters. Waiters just await the Notify.
+/// Uses `DashMap::entry()` for atomic check-and-insert (no TOCTOU race)
+/// and `watch` channels so waiters can't miss the completion signal.
 async fn run_inflight_deduplicated<F, Fut>(
-    inflight: &Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>>,
+    inflight: &DashMap<[u8; 32], watch::Receiver<bool>>,
     key: [u8; 32],
     work: F,
 ) -> bool
@@ -220,24 +222,31 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    // Check if there's already an inflight fetch for this resource
-    let existing_notify = inflight.get(&key).map(|r| r.value().clone());
+    use dashmap::mapref::entry::Entry;
 
-    if let Some(notify) = existing_notify {
-        // Another request is already fetching — wait for it
-        notify.notified().await;
-        false
-    } else {
-        // We're the first — register inflight and do the work
-        let n = Arc::new(tokio::sync::Notify::new());
-        inflight.insert(key, n.clone());
+    match inflight.entry(key) {
+        Entry::Occupied(entry) => {
+            // Another request is already fetching — clone receiver then
+            // release the shard lock before awaiting
+            let mut rx = entry.get().clone();
+            drop(entry);
+            // wait_for checks the current value first, so even if the
+            // fetcher already completed we won't miss it
+            let _ = rx.wait_for(|&done| done).await;
+            false
+        }
+        Entry::Vacant(entry) => {
+            // We're the first — insert a watch receiver so waiters can find it
+            let (tx, rx) = watch::channel(false);
+            entry.insert(rx);
 
-        work().await;
+            work().await;
 
-        // Signal waiters and remove inflight entry
-        inflight.remove(&key);
-        n.notify_waiters();
-        true
+            // Clean up and signal all waiters
+            inflight.remove(&key);
+            let _ = tx.send(true);
+            true
+        }
     }
 }
 
@@ -246,7 +255,7 @@ where
 async fn fetch_if_missing(
     ndb: &Ndb,
     relay_pool: &Arc<RelayPool>,
-    inflight: &Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>>,
+    inflight: &DashMap<[u8; 32], watch::Receiver<bool>>,
     render_data: &mut RenderData,
     nip19: &Nip19,
 ) {
@@ -322,7 +331,7 @@ fn spawn_note_secondary_fetch(
 async fn ensure_profile_feed(
     ndb: &Ndb,
     relay_pool: &Arc<RelayPool>,
-    inflight: &Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>>,
+    inflight: &DashMap<[u8; 32], watch::Receiver<bool>>,
     profile_refresh_state: &Arc<DashMap<[u8; 32], RefreshState>>,
     profile_opt: &Option<ProfileRenderData>,
 ) -> Result<(), Error> {
@@ -972,7 +981,7 @@ mod tests {
 
     #[tokio::test]
     async fn inflight_first_caller_runs_work_and_returns_true() {
-        let inflight: Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>> = Arc::new(DashMap::new());
+        let inflight: Arc<DashMap<[u8; 32], watch::Receiver<bool>>> = Arc::new(DashMap::new());
         let key = test_key(0xCC);
         let work_count = Arc::new(AtomicUsize::new(0));
 
@@ -988,7 +997,7 @@ mod tests {
 
     #[tokio::test]
     async fn inflight_concurrent_callers_only_run_work_once() {
-        let inflight: Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>> = Arc::new(DashMap::new());
+        let inflight: Arc<DashMap<[u8; 32], watch::Receiver<bool>>> = Arc::new(DashMap::new());
         let key = test_key(0xDD);
         let work_count = Arc::new(AtomicUsize::new(0));
 
@@ -1043,7 +1052,7 @@ mod tests {
 
     #[tokio::test]
     async fn inflight_cleans_up_after_completion() {
-        let inflight: Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>> = Arc::new(DashMap::new());
+        let inflight: Arc<DashMap<[u8; 32], watch::Receiver<bool>>> = Arc::new(DashMap::new());
         let key = test_key(0xEE);
 
         run_inflight_deduplicated(&inflight, key, || async {}).await;
@@ -1057,7 +1066,7 @@ mod tests {
 
     #[tokio::test]
     async fn inflight_second_call_after_completion_runs_work_again() {
-        let inflight: Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>> = Arc::new(DashMap::new());
+        let inflight: Arc<DashMap<[u8; 32], watch::Receiver<bool>>> = Arc::new(DashMap::new());
         let key = test_key(0xFF);
         let work_count = Arc::new(AtomicUsize::new(0));
 
@@ -1081,7 +1090,7 @@ mod tests {
 
     #[tokio::test]
     async fn inflight_independent_keys_both_run_work() {
-        let inflight: Arc<DashMap<[u8; 32], Arc<tokio::sync::Notify>>> = Arc::new(DashMap::new());
+        let inflight: Arc<DashMap<[u8; 32], watch::Receiver<bool>>> = Arc::new(DashMap::new());
         let key_a = test_key(0xAA);
         let key_b = test_key(0xBB);
         let work_count = Arc::new(AtomicUsize::new(0));

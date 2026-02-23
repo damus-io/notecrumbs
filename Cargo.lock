@@ -1872,6 +1872,7 @@ dependencies = [
 [[package]]
 name = "nostrdb"
 version = "0.10.0"
+source = "git+https://github.com/damus-io/nostrdb-rs?branch=zap-metadata#a91b6b90812f77e0df5c9bd7164560a3d5a9e197"
 dependencies = [
  "bindgen 0.69.5",
  "cc",

@@ -571,7 +571,7 @@ async fn serve(
         .await?;
     }
 
-    if is_png {
+    let result = if is_png {
         let data = render::render_note(app, &render_data);
 
         Ok(Response::builder()
@@ -592,6 +592,13 @@ async fn serve(
                 html::serve_profile_html(app, &nip19, profile_rd.as_ref(), r)
             }
         }
+    };
+
+    match result {
+        Err(Error::NotFound) => Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Full::new(Bytes::from("Not found\n")))?),
+        other => other,
     }
 }
 

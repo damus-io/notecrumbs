@@ -684,6 +684,12 @@ pub fn collect_note_unknowns(
 }
 
 /// Fetch unknown IDs (quoted events, profiles) from relays using relay hints.
+/// Fetch unknown IDs (quoted events, profiles) from relays using relay hints.
+///
+/// Subscribes to ndb filters before fetching so we can wait for the writer
+/// thread to finish processing ingested events. Without this, process_event_with
+/// queues events asynchronously and they may not be queryable when the caller
+/// opens a transaction to render.
 pub async fn fetch_unknowns(
     relay_pool: &Arc<RelayPool>,
     ndb: &Ndb,
@@ -691,21 +697,33 @@ pub async fn fetch_unknowns(
 ) -> Result<()> {
     use nostr_sdk::JsonUtil;
 
-    // Collect relay hints before consuming unknowns
+    // Collect relay hints and needed profile pubkeys before consuming unknowns.
+    // Merge relay hints with default relays so hintless profiles (e.g. @npub
+    // with no relay hint) still get queried on default relays.
     let relay_hints = unknowns.relay_hints();
-    let relay_targets: Vec<RelayUrl> = if relay_hints.is_empty() {
-        relay_pool.default_relays().to_vec()
-    } else {
-        relay_hints.into_iter().collect()
+    let needed_profiles = unknowns.profile_pubkeys();
+    let relay_targets: Vec<RelayUrl> = {
+        let mut targets: Vec<RelayUrl> = relay_pool.default_relays().to_vec();
+        for hint in relay_hints {
+            if !targets.contains(&hint) {
+                targets.push(hint);
+            }
+        }
+        targets
     };
 
-    // Build and convert filters in one go (nostrdb::Filter is not Send)
-    let nostr_filters: Vec<nostr::Filter> = {
+    // Build ndb filters, subscribe, then convert for relay fetch.
+    // nostrdb::Filter is not Send, so everything stays in this sync block.
+    // Subscribe BEFORE fetching so the subscription catches ingested events.
+    let (nostr_filters, mut ndb_stream) = {
         let filters = unknowns.to_filters();
         if filters.is_empty() {
             return Ok(());
         }
-        filters.iter().map(convert_filter).collect()
+        let nostr_filters: Vec<nostr::Filter> = filters.iter().map(convert_filter).collect();
+        let sub_id = ndb.subscribe(&filters)?;
+        let stream = sub_id.stream(ndb).notes_per_await(4);
+        (nostr_filters, stream)
     };
 
     // Now we can await - nostrdb::Filter has been dropped
@@ -718,6 +736,7 @@ pub async fn fetch_unknowns(
     );
 
     // Stream with shorter timeout since these are secondary fetches
+    let mut ingested = 0usize;
     for filter in nostr_filters {
         let mut stream = relay_pool
             .stream_events(filter, &relay_targets, Duration::from_millis(1500))
@@ -730,11 +749,92 @@ pub async fn fetch_unknowns(
                 .unwrap_or_else(IngestMetadata::new);
             if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
                 warn!("error processing quoted event: {err}");
+            } else {
+                ingested += 1;
+            }
+        }
+    }
+
+    // Wait for ndb writer thread to finish processing ingested events.
+    // Use semantic readiness: check that needed profiles are actually queryable
+    // via get_profile_by_pubkey, not just count-based.
+    if ingested > 0 {
+        let wait_for = Duration::from_millis(500);
+        while let Ok(Some(_note_keys)) = timeout(wait_for, ndb_stream.next()).await {
+            if profiles_ready(ndb, &needed_profiles) {
+                break;
             }
         }
     }
 
     Ok(())
+}
+
+/// Check whether all needed profiles are queryable in ndb.
+fn profiles_ready(ndb: &Ndb, pubkeys: &[[u8; 32]]) -> bool {
+    if pubkeys.is_empty() {
+        return true;
+    }
+    let Ok(txn) = Transaction::new(ndb) else {
+        return false;
+    };
+    pubkeys
+        .iter()
+        .all(|pk| ndb.get_profile_by_pubkey(&txn, pk).is_ok())
+}
+
+/// Collect unknowns from the parent note's content blocks.
+/// Call this after the initial unknowns fetch so the parent note is in ndb.
+pub fn collect_parent_unknowns(
+    ndb: &Ndb,
+    note_rd: &NoteRenderData,
+) -> Option<crate::unknowns::UnknownIds> {
+    let txn = Transaction::new(ndb).ok()?;
+    let note = note_rd.lookup(&txn, ndb).ok()?;
+
+    use nostrdb::NoteReply;
+    let reply_info = NoteReply::new(note.tags());
+    let parent_ref = reply_info.reply().or_else(|| reply_info.root())?;
+    let parent_note = ndb.get_note_by_id(&txn, parent_ref.id).ok()?;
+
+    let mut unknowns = crate::unknowns::UnknownIds::new();
+    unknowns.add_profile_if_missing(ndb, &txn, parent_note.pubkey());
+    unknowns.collect_from_blocks(ndb, &txn, &parent_note);
+
+    if unknowns.is_empty() {
+        None
+    } else {
+        Some(unknowns)
+    }
+}
+
+/// Collect unknown profiles mentioned in reply note content blocks.
+/// Iterates replies already ingested in ndb and calls collect_from_blocks on each.
+pub fn collect_reply_content_unknowns(
+    ndb: &Ndb,
+    note_rd: &NoteRenderData,
+) -> Option<crate::unknowns::UnknownIds> {
+    let txn = Transaction::new(ndb).ok()?;
+    let note = note_rd.lookup(&txn, ndb).ok()?;
+
+    let filter = nostrdb::Filter::new()
+        .kinds([1])
+        .event(note.id())
+        .limit(DIRECT_REPLY_LIMIT as u64)
+        .build();
+    let results = ndb.query(&txn, &[filter], DIRECT_REPLY_LIMIT).ok()?;
+
+    let mut unknowns = crate::unknowns::UnknownIds::new();
+
+    for result in &results {
+        unknowns.collect_from_blocks(ndb, &txn, &result.note);
+    }
+
+    if unknowns.is_empty() {
+        None
+    } else {
+        Some(unknowns)
+    }
 }
 
 /// Fetch kind:7 reactions for a note from relays and ingest into ndb.
@@ -768,6 +868,11 @@ pub fn collect_reply_unknowns(
 }
 
 /// Fetch note stats (reactions, replies, reposts) from relays and ingest into ndb.
+///
+/// Subscribes to the reply (kind:1) filter before fetching so we can wait for
+/// the ndb writer thread to fully process reply events (including block parsing).
+/// Without this, `collect_reply_content_unknowns` may not find blocks for replies,
+/// causing mention profiles in reply content to never be fetched.
 pub async fn fetch_note_stats(
     relay_pool: &Arc<RelayPool>,
     ndb: &Ndb,
@@ -776,17 +881,25 @@ pub async fn fetch_note_stats(
 ) -> Result<()> {
     use nostr_sdk::JsonUtil;
 
-    // Build filters for reactions (kind:7), replies (kind:1), and reposts (kind:6)
-    // nostrdb::Filter is not Send, so convert before await
-    let filters: Vec<nostr::Filter> = {
+    // Build filters for reactions (kind:7), replies (kind:1), and reposts (kind:6).
+    // Subscribe to the reply filter before fetching so we catch writer notifications.
+    // nostrdb::Filter is not Send, so everything stays in this sync block.
+    let (filters, mut reply_stream) = {
         let txn = Transaction::new(ndb)?;
         let note = note_rd.lookup(&txn, ndb)?;
         let id = note.id();
-        vec![
+
+        // Subscribe to reply filter so we know when replies are fully indexed
+        let reply_filter = nostrdb::Filter::new().kinds([1]).event(id).build();
+        let sub_id = ndb.subscribe(&[reply_filter])?;
+        let stream = sub_id.stream(ndb).notes_per_await(2);
+
+        let nostr_filters = vec![
             convert_filter(&nostrdb::Filter::new().kinds([7]).event(id).build()),
             convert_filter(&nostrdb::Filter::new().kinds([1]).event(id).build()),
             convert_filter(&nostrdb::Filter::new().kinds([6]).event(id).build()),
-        ]
+        ];
+        (nostr_filters, stream)
     };
 
     let relay_targets: Vec<RelayUrl> = if source_relays.is_empty() {
@@ -799,18 +912,42 @@ pub async fn fetch_note_stats(
 
     debug!("fetching note stats from {:?}", relay_targets);
 
+    let mut reply_ingested = 0usize;
     for filter in filters {
         let mut stream = relay_pool
             .stream_events(filter, &relay_targets, Duration::from_millis(1500))
             .await?;
 
         while let Some(relay_event) = stream.next().await {
+            let is_reply = relay_event.event.kind == Kind::TextNote;
             let ingest_meta = relay_event
                 .relay_url()
                 .map(|url| IngestMetadata::new().relay(url.as_str()))
                 .unwrap_or_else(IngestMetadata::new);
-            if let Err(err) = ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
-                warn!("error processing event: {err}");
+            match ndb.process_event_with(&relay_event.event.as_json(), ingest_meta) {
+                Ok(_) if is_reply => {
+                    reply_ingested += 1;
+                }
+                Err(err) => {
+                    warn!("error processing event: {err}");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Wait for ndb writer to fully process reply events (including block parsing).
+    // The subscription fires after each event is fully indexed, so once we've seen
+    // all ingested replies, their blocks are guaranteed to be available.
+    if reply_ingested > 0 {
+        let wait_for = Duration::from_millis(500);
+        let mut seen = 0;
+        while seen < reply_ingested {
+            match timeout(wait_for, reply_stream.next()).await {
+                Ok(Some(note_keys)) => {
+                    seen += note_keys.len();
+                }
+                _ => break,
             }
         }
     }

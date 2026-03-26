@@ -415,6 +415,17 @@ async fn fetch_note_secondary_data(
         render::fetch_unknowns(relay_pool, ndb, unknowns).await?;
     }
 
+    // Fetch parent note content unknowns (profiles mentioned in parent)
+    if let Some(parent_unknowns) = render::collect_parent_unknowns(ndb, note_rd) {
+        tracing::debug!(
+            "fetching {} parent content unknowns",
+            parent_unknowns.ids_len()
+        );
+        if let Err(err) = render::fetch_unknowns(relay_pool, ndb, parent_unknowns).await {
+            tracing::warn!("failed to fetch parent unknowns: {err}");
+        }
+    }
+
     // Fetch note stats (reactions, replies, reposts)
     render::fetch_note_stats(relay_pool, ndb, note_rd, source_relays).await?;
 
@@ -426,6 +437,17 @@ async fn fetch_note_secondary_data(
         );
         if let Err(err) = render::fetch_unknowns(relay_pool, ndb, reply_unknowns).await {
             tracing::warn!("failed to fetch reply author profiles: {err}");
+        }
+    }
+
+    // Fetch profiles mentioned in reply content
+    if let Some(reply_content_unknowns) = render::collect_reply_content_unknowns(ndb, note_rd) {
+        tracing::debug!(
+            "fetching {} reply content unknowns",
+            reply_content_unknowns.ids_len()
+        );
+        if let Err(err) = render::fetch_unknowns(relay_pool, ndb, reply_content_unknowns).await {
+            tracing::warn!("failed to fetch reply content unknowns: {err}");
         }
     }
 

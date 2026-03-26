@@ -68,6 +68,17 @@ impl UnknownIds {
         self.ids.entry(unknown_id).or_default();
     }
 
+    /// Returns the profile pubkeys from the unknowns collection.
+    pub fn profile_pubkeys(&self) -> Vec<[u8; 32]> {
+        self.ids
+            .keys()
+            .filter_map(|id| match id {
+                UnknownId::Profile(pk) => Some(*pk),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Collect all relay hints from unknowns.
     pub fn relay_hints(&self) -> HashSet<RelayUrl> {
         self.ids
@@ -197,7 +208,7 @@ impl UnknownIds {
     }
 
     /// Collect unknowns from content blocks (mentions).
-    fn collect_from_blocks(&mut self, ndb: &Ndb, txn: &Transaction, note: &Note) {
+    pub fn collect_from_blocks(&mut self, ndb: &Ndb, txn: &Transaction, note: &Note) {
         let Some(note_key) = note.key() else {
             return;
         };

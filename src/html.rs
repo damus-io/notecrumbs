@@ -1058,6 +1058,89 @@ fn author_handle_html(profile: Option<&ProfileRecord<'_>>) -> String {
         .unwrap_or_default()
 }
 
+/// Render a note preview as plain HTML text with mention resolution.
+///
+/// Iterates content blocks, resolving nprofile/npub mentions to `@DisplayName`
+/// and hashtags to `#tag`. Truncates to `max_chars` on block boundaries
+/// (never slices mid-mention) and appends "..." when truncated.
+pub fn render_note_preview_html(
+    note: &Note,
+    ndb: &Ndb,
+    txn: &Transaction,
+    max_chars: usize,
+) -> String {
+    let blocks = note
+        .key()
+        .and_then(|nk| ndb.get_blocks_by_key(txn, nk).ok());
+
+    let Some(blocks) = blocks else {
+        let content = abbreviate(note.content(), max_chars);
+        let truncated = content.len() < note.content().len();
+        let escaped = html_escape::encode_text(content);
+        if truncated {
+            return format!("{}...", escaped);
+        }
+        return escaped.into_owned();
+    };
+
+    let mut out = String::new();
+    let mut char_count = 0;
+    let mut truncated = false;
+
+    for block in blocks.iter(note) {
+        let fragment = match block.blocktype() {
+            BlockType::MentionBech32 => {
+                if let Some(mention) = block.as_mention() {
+                    match mention {
+                        Mention::Profile(nprofile) => {
+                            resolve_mention_name(ndb, txn, nprofile.pubkey(), block.as_str())
+                        }
+                        Mention::Pubkey(npub) => {
+                            resolve_mention_name(ndb, txn, npub.pubkey(), block.as_str())
+                        }
+                        _ => format!("@{}", abbrev_str(block.as_str())),
+                    }
+                } else {
+                    format!("@{}", abbrev_str(block.as_str()))
+                }
+            }
+            BlockType::Hashtag => format!("#{}", block.as_str()),
+            _ => block.as_str().to_owned(),
+        };
+
+        let fragment_chars = fragment.chars().count();
+        if char_count + fragment_chars > max_chars {
+            // For plain text blocks, include a truncated portion instead of
+            // dropping the entire block.
+            let remaining = max_chars - char_count;
+            if remaining > 0 && matches!(block.blocktype(), BlockType::Text) {
+                let partial: String = fragment.chars().take(remaining).collect();
+                let _ = write!(out, "{}", html_escape::encode_text(&partial));
+            }
+            truncated = true;
+            break;
+        }
+
+        let _ = write!(out, "{}", html_escape::encode_text(&fragment));
+        char_count += fragment_chars;
+    }
+
+    if truncated {
+        out.push_str("...");
+    }
+
+    out
+}
+
+/// Resolve a mention pubkey to `@DisplayName` or fall back to abbreviated bech32.
+fn resolve_mention_name(ndb: &Ndb, txn: &Transaction, pk: &[u8; 32], raw: &str) -> String {
+    let record = ndb.get_profile_by_pubkey(txn, pk).ok();
+    match get_profile_display_name(record.as_ref()) {
+        Some(name) => format!("@{}", name),
+        None => format!("@{}", abbrev_str(raw)),
+    }
+}
+
 /// Extracts parent note info for thread layout.
 /// Returns None if the note is not a reply.
 struct ParentNoteInfo {
@@ -1079,7 +1162,13 @@ fn get_parent_note_info(
     let reply_info = NoteReply::new(note.tags());
     let parent_ref = reply_info.reply().or_else(|| reply_info.root())?;
 
-    let link = EventId::from_byte_array(*parent_ref.id)
+    // Use nevent1 (with relay hint) instead of note1 for better discoverability
+    let event_id = EventId::from_byte_array(*parent_ref.id);
+    let mut nevent = Nip19Event::new(event_id);
+    if let Some(relay) = parent_ref.relay.and_then(|s| RelayUrl::parse(s).ok()) {
+        nevent = nevent.relays(std::iter::once(relay));
+    }
+    let link = nevent
         .to_bech32()
         .map(|b| format!("{}/{}", base_url, b))
         .unwrap_or_else(|_| "#".to_string());
@@ -1088,13 +1177,6 @@ fn get_parent_note_info(
         Ok(parent_note) => {
             let parent_profile = ndb.get_profile_by_pubkey(txn, parent_note.pubkey()).ok();
             let name = get_profile_display_name(parent_profile.as_ref()).unwrap_or("nostrich");
-
-            let content = abbreviate(parent_note.content(), 200);
-            let ellipsis = if content.len() < parent_note.content().len() {
-                "..."
-            } else {
-                ""
-            };
 
             let pfp = pfp_url_attr(
                 parent_profile.as_ref().and_then(|r| r.record().profile()),
@@ -1109,7 +1191,7 @@ fn get_parent_note_info(
                     parent_note.created_at(),
                 ))
                 .into_owned(),
-                content_html: format!("{}{}", html_escape::encode_text(content), ellipsis),
+                content_html: render_note_preview_html(&parent_note, ndb, txn, 200),
             })
         }
         Err(_) => {
@@ -1259,24 +1341,15 @@ fn build_replies_html(app: &Notecrumbs, txn: &Transaction, note: &Note, base_url
         let display_name = get_profile_display_name(profile_rec.as_ref()).unwrap_or("nostrich");
         let display_name_html = html_escape::encode_text(display_name);
 
-        let pfp_url = profile_rec
-            .as_ref()
-            .and_then(|r| r.record().profile())
-            .and_then(|p| p.picture())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("/img/no-profile.svg");
-        let pfp_attr = html_escape::encode_double_quoted_attribute(pfp_url);
+        let pfp_attr = pfp_url_attr(
+            profile_rec.as_ref().and_then(|r| r.record().profile()),
+            base_url,
+        );
 
         let time_str = format_relative_time(reply.created_at());
         let time_html = html_escape::encode_text(&time_str);
 
-        let content = abbreviate(reply.content(), 300);
-        let ellipsis = if content.len() < reply.content().len() {
-            "..."
-        } else {
-            ""
-        };
-        let content_html = format!("{}{}", html_escape::encode_text(content), ellipsis);
+        let content_html = render_note_preview_html(reply, &app.ndb, txn, 300);
 
         let reply_nevent = Nip19Event::new(EventId::from_byte_array(reply.id().to_owned()));
         let reply_id = reply_nevent.to_bech32().unwrap_or_default();

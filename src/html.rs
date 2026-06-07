@@ -1880,13 +1880,8 @@ fn pfp_url_attr(profile: Option<NdbProfile<'_>>, base_url: &str) -> String {
     html_escape::encode_double_quoted_attribute(&pfp_url_raw).into_owned()
 }
 
-fn profile_not_found() -> Result<http::Response<http_body_util::Full<bytes::Bytes>>, http::Error> {
-    let mut data = Vec::new();
-    let _ = write!(data, "Profile not found :(");
-    Response::builder()
-        .header(header::CONTENT_TYPE, "text/html")
-        .status(StatusCode::NOT_FOUND)
-        .body(Full::new(Bytes::from(data)))
+fn profile_not_found() -> Response<Full<Bytes>> {
+    not_found_response("We couldn't find that profile on the relays we checked.")
 }
 
 pub fn serve_profile_html(
@@ -1897,7 +1892,7 @@ pub fn serve_profile_html(
 ) -> Result<Response<Full<Bytes>>, Error> {
     let profile_key = match profile_rd {
         None | Some(ProfileRenderData::Missing(_)) => {
-            return Ok(profile_not_found()?);
+            return Ok(profile_not_found());
         }
 
         Some(ProfileRenderData::Profile(profile_key)) => *profile_key,
@@ -1908,7 +1903,7 @@ pub fn serve_profile_html(
     let profile_rec = match app.ndb.get_profile_by_key(&txn, profile_key) {
         Ok(profile_rec) => profile_rec,
         Err(_) => {
-            return Ok(profile_not_found()?);
+            return Ok(profile_not_found());
         }
     };
 
@@ -2355,6 +2350,83 @@ pub fn serve_homepage(_r: Request<hyper::body::Incoming>) -> Result<Response<Ful
 
 fn get_base_url() -> String {
     std::env::var("NOTECRUMBS_BASE_URL").unwrap_or_else(|_| "https://damus.io".to_string())
+}
+
+/// Render the shared, Damus-styled 404 page. `message` is the human-friendly
+/// explanation shown in the card (already plain text — it will be escaped).
+fn render_not_found_html(message: &str) -> Vec<u8> {
+    let base_url = get_base_url();
+    let page_title = "Not found — notecrumbs";
+    let og_image_url = format!("{}/assets/default_pfp.jpg", base_url);
+
+    let canonical_url_attr = html_escape::encode_double_quoted_attribute(&base_url).into_owned();
+    let og_image_attr = html_escape::encode_double_quoted_attribute(&og_image_url).into_owned();
+    let page_title_attr = html_escape::encode_double_quoted_attribute(page_title).into_owned();
+    let page_title_html = html_escape::encode_text(page_title).into_owned();
+    let message_html = html_escape::encode_text(message).into_owned();
+
+    let mut data = Vec::new();
+    let _ = write!(
+        data,
+        r##"<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>{page_title}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="{page_title_attr}" />
+    <meta name="robots" content="noindex" />
+    <link rel="preload" href="/fonts/PoetsenOne-Regular.ttf" as="font" type="font/ttf" crossorigin />
+    <link rel="stylesheet" href="/damus.css?v=7" type="text/css" />
+    <meta property="og:title" content="{page_title_attr}" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="{canonical_url}" />
+    <meta property="og:image" content="{og_image}" />
+    <meta property="og:site_name" content="Damus" />
+    <meta name="theme-color" content="#bd66ff" />
+  </head>
+  <body>
+    <div class="damus-app">
+      <header class="damus-header">
+        <a class="damus-logo-link" href="https://damus.io" target="_blank" rel="noopener noreferrer"><img class="damus-logo-image" src="/assets/logo_icon.png?v=2" alt="Damus" width="40" height="40" /></a>
+        <div class="damus-header-actions">
+          <a class="damus-link" href="https://damus.io" target="_blank" rel="noopener noreferrer">damus.io</a>
+        </div>
+      </header>
+      <main class="damus-main">
+        <section class="damus-card">
+          <h1>404</h1>
+          <p class="damus-supporting">{message}</p>
+          <p class="damus-supporting">
+            Double-check the bech32 identifier in the URL, or head back to the <a href="/">homepage</a>.
+          </p>
+        </section>
+      </main>
+      <footer class="damus-footer">
+        <a href="https://github.com/damus-io/notecrumbs" target="_blank" rel="noopener noreferrer">Rendered by notecrumbs</a>
+      </footer>
+    </div>
+  </body>
+</html>
+"##,
+        page_title = page_title_html,
+        page_title_attr = page_title_attr,
+        canonical_url = canonical_url_attr,
+        og_image = og_image_attr,
+        message = message_html,
+    );
+
+    data
+}
+
+/// Build a styled 404 response with the given explanatory message.
+pub fn not_found_response(message: &str) -> Response<Full<Bytes>> {
+    let body = render_not_found_html(message);
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .status(StatusCode::NOT_FOUND)
+        .body(Full::new(Bytes::from(body)))
+        .expect("building 404 response")
 }
 
 pub fn serve_note_html(

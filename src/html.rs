@@ -352,6 +352,85 @@ pub fn serve_note_json(
         .body(Full::new(Bytes::from(body)))?)
 }
 
+pub fn serve_profile_json(
+    ndb: &Ndb,
+    profile_rd: Option<&ProfileRenderData>,
+) -> Result<Response<Full<Bytes>>, Error> {
+    use serde_json::{Map, Value};
+
+    let profile_key = match profile_rd {
+        Some(ProfileRenderData::Profile(profile_key)) => *profile_key,
+        None | Some(ProfileRenderData::Missing(_)) => return Err(Error::NotFound),
+    };
+
+    let txn = Transaction::new(ndb)?;
+
+    let profile_rec = match ndb.get_profile_by_key(&txn, profile_key) {
+        Ok(profile_rec) => profile_rec,
+        Err(_) => return Err(Error::NotFound),
+    };
+    let record = profile_rec.record();
+
+    let profile_note_key = NoteKey::new(record.note_key());
+    let profile_note = match ndb.get_note_by_key(&txn, profile_note_key) {
+        Ok(note) => note,
+        Err(_) => return Err(Error::NotFound),
+    };
+
+    // Break out the parsed metadata fields from nostrdb rather than echoing the
+    // raw kind-0 event with its stringified `content`.
+    let mut obj = Map::new();
+    obj.insert(
+        "pubkey".to_string(),
+        Value::String(hex::encode(profile_note.pubkey())),
+    );
+
+    if let Some(profile) = record.profile() {
+        let mut put = |key: &str, val: Option<&str>| {
+            if let Some(v) = val.map(str::trim).filter(|s| !s.is_empty()) {
+                obj.insert(key.to_string(), Value::String(v.to_string()));
+            }
+        };
+        put("name", profile.name());
+        put("display_name", profile.display_name());
+        put("about", profile.about());
+        put("picture", profile.picture());
+        put("banner", profile.banner());
+        put("website", profile.website());
+        put("nip05", profile.nip05());
+        put("lud06", profile.lud06());
+        put("lud16", profile.lud16());
+    }
+    if let Some(lnurl) = record.lnurl().map(str::trim).filter(|s| !s.is_empty()) {
+        obj.insert("lnurl".to_string(), Value::String(lnurl.to_string()));
+    }
+
+    // Recent notes feed, newest first — mirrors the HTML profile page.
+    let mut recent_notes = Vec::new();
+    let notes_filter = Filter::new()
+        .authors([profile_note.pubkey()])
+        .kinds([1])
+        .limit(PROFILE_FEED_RECENT_LIMIT as u64)
+        .build();
+    if let Ok(mut results) = ndb.query(&txn, &[notes_filter], PROFILE_FEED_RECENT_LIMIT as i32) {
+        results.sort_by_key(|result| result.note.created_at());
+        results.reverse();
+        for result in &results {
+            if let Ok(note_value) = serde_json::from_str::<Value>(&result.note.json()?) {
+                recent_notes.push(note_value);
+            }
+        }
+    }
+    obj.insert("recent_notes".to_string(), Value::Array(recent_notes));
+
+    let body = serde_json::to_vec(&Value::Object(obj))?;
+
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .status(StatusCode::OK)
+        .body(Full::new(Bytes::from(body)))?)
+}
+
 fn ends_with(haystack: &str, needle: &str) -> bool {
     if haystack.len() < needle.len() {
         return false;
@@ -1942,12 +2021,7 @@ pub fn serve_profile_html(
     let profile_note_key = NoteKey::new(profile_record.note_key());
 
     let Ok(profile_note) = app.ndb.get_note_by_key(&txn, profile_note_key) else {
-        let mut data = Vec::new();
-        let _ = write!(data, "Profile not found :(");
-        return Ok(Response::builder()
-            .header(header::CONTENT_TYPE, "text/html")
-            .status(StatusCode::NOT_FOUND)
-            .body(Full::new(Bytes::from(data)))?);
+        return Ok(profile_not_found());
     };
 
     /* relays */
@@ -2427,6 +2501,18 @@ pub fn not_found_response(message: &str) -> Response<Full<Bytes>> {
         .status(StatusCode::NOT_FOUND)
         .body(Full::new(Bytes::from(body)))
         .expect("building 404 response")
+}
+
+/// Build a JSON 404 response for the `.json` endpoints.
+pub fn not_found_json(message: &str) -> Response<Full<Bytes>> {
+    let message_json =
+        serde_json::to_string(message).unwrap_or_else(|_| "\"not found\"".to_string());
+    let body = format!("{{\"error\":\"not_found\",\"message\":{message_json}}}\n");
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .status(StatusCode::NOT_FOUND)
+        .body(Full::new(Bytes::from(body)))
+        .expect("building json 404 response")
 }
 
 pub fn serve_note_html(

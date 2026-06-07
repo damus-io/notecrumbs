@@ -515,9 +515,12 @@ async fn serve(
     let nip19 = match Nip19::from_bech32(&r.uri().path()[1..path_len - until]) {
         Ok(nip19) => nip19,
         Err(_) => {
-            return Ok(html::not_found_response(
-                "That doesn't look like a valid Nostr bech32 identifier.",
-            ));
+            let msg = "That doesn't look like a valid Nostr bech32 identifier.";
+            return Ok(if is_json {
+                html::not_found_json(msg)
+            } else {
+                html::not_found_response(msg)
+            });
         }
     };
 
@@ -581,9 +584,9 @@ async fn serve(
     } else if is_json {
         match render_data {
             RenderData::Note(note_rd) => html::serve_note_json(&app.ndb, &note_rd),
-            RenderData::Profile(_profile_rd) => Ok(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Full::new(Bytes::from("todo: profile json")))?),
+            RenderData::Profile(profile_rd) => {
+                html::serve_profile_json(&app.ndb, profile_rd.as_ref())
+            }
         }
     } else {
         match render_data {
@@ -703,6 +706,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     service_fn(|req| {
                         let app = &app_copy;
                         async move {
+                            let wants_json = req.uri().path().ends_with(".json");
                             match serve(app, req).await {
                                 Ok(resp) => Ok::<_, std::convert::Infallible>(resp),
                                 Err(err) => {
@@ -711,10 +715,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                             // 404s are routine (notes that haven't
                                             // propagated yet, bad ids); log quietly.
                                             debug!("serve error (404): {}", err);
-                                            html::not_found_response(
-                                                "We couldn't find that note or profile \
-                                                 on the relays we checked.",
-                                            )
+                                            let msg = "We couldn't find that note or profile \
+                                                       on the relays we checked.";
+                                            if wants_json {
+                                                html::not_found_json(msg)
+                                            } else {
+                                                html::not_found_response(msg)
+                                            }
                                         }
                                         _ => {
                                             error!("serve error (500): {}", err);

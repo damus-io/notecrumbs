@@ -15,7 +15,7 @@ use hyper_util::rt::TokioIo;
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::{
     error::Error,
@@ -515,9 +515,12 @@ async fn serve(
     let nip19 = match Nip19::from_bech32(&r.uri().path()[1..path_len - until]) {
         Ok(nip19) => nip19,
         Err(_) => {
-            return Ok(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Full::new(Bytes::from("Invalid url\n")))?);
+            let msg = "That doesn't look like a valid Nostr bech32 identifier.";
+            return Ok(if is_json {
+                html::not_found_json(msg)
+            } else {
+                html::not_found_response(msg)
+            });
         }
     };
 
@@ -581,9 +584,9 @@ async fn serve(
     } else if is_json {
         match render_data {
             RenderData::Note(note_rd) => html::serve_note_json(&app.ndb, &note_rd),
-            RenderData::Profile(_profile_rd) => Ok(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Full::new(Bytes::from("todo: profile json")))?),
+            RenderData::Profile(profile_rd) => {
+                html::serve_profile_json(&app.ndb, profile_rd.as_ref())
+            }
         }
     } else {
         match render_data {
@@ -698,8 +701,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tokio::task::spawn(async move {
             // Finally, we bind the incoming connection to our `hello` service
             if let Err(err) = http1::Builder::new()
-                // `service_fn` converts our function in a `Service`
-                .serve_connection(io, service_fn(|req| serve(&app_copy, req)))
+                .serve_connection(
+                    io,
+                    service_fn(|req| {
+                        let app = &app_copy;
+                        async move {
+                            let wants_json = req.uri().path().ends_with(".json");
+                            match serve(app, req).await {
+                                Ok(resp) => Ok::<_, std::convert::Infallible>(resp),
+                                Err(err) => {
+                                    let resp = match &err {
+                                        Error::NotFound => {
+                                            // 404s are routine (notes that haven't
+                                            // propagated yet, bad ids); log quietly.
+                                            debug!("serve error (404): {}", err);
+                                            let msg = "We couldn't find that note or profile \
+                                                       on the relays we checked.";
+                                            if wants_json {
+                                                html::not_found_json(msg)
+                                            } else {
+                                                html::not_found_response(msg)
+                                            }
+                                        }
+                                        _ => {
+                                            error!("serve error (500): {}", err);
+                                            Response::builder()
+                                                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                                .body(Full::new(Bytes::from(format!("{}\n", err))))
+                                                .expect("building error response")
+                                        }
+                                    };
+                                    Ok(resp)
+                                }
+                            }
+                        }
+                    }),
+                )
                 .await
             {
                 println!("Error serving connection: {:?}", err);

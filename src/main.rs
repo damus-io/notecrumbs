@@ -15,7 +15,7 @@ use hyper_util::rt::TokioIo;
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::{
     error::Error,
@@ -698,8 +698,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tokio::task::spawn(async move {
             // Finally, we bind the incoming connection to our `hello` service
             if let Err(err) = http1::Builder::new()
-                // `service_fn` converts our function in a `Service`
-                .serve_connection(io, service_fn(|req| serve(&app_copy, req)))
+                .serve_connection(
+                    io,
+                    service_fn(|req| {
+                        let app = &app_copy;
+                        async move {
+                            match serve(app, req).await {
+                                Ok(resp) => Ok::<_, std::convert::Infallible>(resp),
+                                Err(err) => {
+                                    let status = match &err {
+                                        Error::NotFound => StatusCode::NOT_FOUND,
+                                        _ => StatusCode::INTERNAL_SERVER_ERROR,
+                                    };
+                                    // 404s are routine (notes that haven't propagated,
+                                    // bad ids); only log genuine server errors loudly.
+                                    if status.is_server_error() {
+                                        error!("serve error ({}): {}", status.as_u16(), err);
+                                    } else {
+                                        debug!("serve error ({}): {}", status.as_u16(), err);
+                                    }
+                                    Ok(Response::builder()
+                                        .status(status)
+                                        .body(Full::new(Bytes::from(format!("{}\n", err))))
+                                        .expect("building error response"))
+                                }
+                            }
+                        }
+                    }),
+                )
                 .await
             {
                 println!("Error serving connection: {:?}", err);
